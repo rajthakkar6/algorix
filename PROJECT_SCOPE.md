@@ -72,20 +72,90 @@ forward — see INDICATORS.md §F1.
 - No UI needed yet — this is a data-integrity requirement, not a feature,
   so the scoring can be validated against real outcomes later.
 
+### 3.4 Watchlist-Triggered Background Analysis
+
+Adding a stock to the watchlist starts a background job for that stock.
+
+**Trigger:** stock added to watchlist → job enqueued → runs async.
+
+**Two job types, deliberately separated:**
+
+| Job | When | Does |
+|---|---|---|
+| **Deep analysis** (one-shot) | On add | Full history pull, all Bucket A–C indicators, peer/sector comparison, ATR-derived stop & position size, score + written breakdown |
+| **Monitor** (recurring) | While on watchlist | Re-checks score daily, watches price against levels the deep analysis produced, fires alert on threshold crossing or score change |
+
+**Removal from watchlist cancels the recurring job** — otherwise dead jobs
+accumulate and burn API quota.
+
+**Why background rather than synchronous:** a deep analysis pulls years of
+history plus delivery data for one stock; at broker-API rate limits this is
+seconds-to-minutes, too slow to block a UI action on.
+
+### 3.5 Real-Time Stock Lookup (any ticker)
+
+On-demand information for **any** NSE/BSE stock, not just the Nifty 50
+universe.
+
+**Important distinction — real-time price ≠ real-time score:**
+Most of the scoring model runs on daily bars, and two key inputs are
+*published only after market close by NSE*: delivery % (A6) and FII/DII flow
+(B4). A score recomputed on every tick would be partly stale by construction
+and would imply a precision the model does not have.
+
+So the layers are split:
+
+| Layer | Cadence | Contents |
+|---|---|---|
+| **Real-time** | Live / on-demand | Price, change %, volume, day range, basic intraday context |
+| **Score** | Daily (post-close / pre-open) | Full composite score + breakdown |
+| **Alerting** | Live | Price crossing levels the *daily* score produced |
+
+Real-time is for **monitoring and triggers**, not for re-scoring. This keeps
+the swing-trading model honest and avoids inviting intraday overtrading,
+which is outside the stated trading style.
+
+**Universe/ranking problem this creates:** see [INDICATORS.md](INDICATORS.md)
+§0.2 — cross-sectional percentile ranking requires a defined universe. An
+arbitrary off-universe ticker has nothing to be ranked against. **[OPEN]**,
+options documented in INDICATORS.md.
+
 ---
 
-## 4. Architecture (proposed)
+## 4. Architecture (revised)
+
+§3.4 and §3.5 move this past a single cron job. It now needs a persistent
+service, a job queue, and a live data feed.
 
 | Layer | Choice | Why |
 |---|---|---|
-| Language | Python | Best fit for data/finance libs (pandas, pandas-ta, yfinance) |
-| Scheduling | cron (or APScheduler) | Once-a-day job, no need for a long-running scheduler process |
-| Storage | SQLite | Personal use, low volume, zero ops overhead |
-| Delivery | Telegram bot | Free, instant, visible on phone before market open |
-| Indicators | `pandas-ta` | Standard TA library, avoids reimplementing RSI/MACD/etc. |
+| Language | Python | Best fit for data/finance libs (pandas, pandas-ta) |
+| API service | FastAPI | Serves watchlist actions + on-demand lookups; async-native |
+| Job queue | Celery or RQ + Redis | Background watchlist jobs, retries, cancellation |
+| Scheduling | Celery beat (or cron for the nightly batch) | Recurring monitor jobs + nightly universe scan |
+| Storage | SQLite → Postgres if it grows | Personal use; Postgres only if concurrency demands it |
+| Live data | Broker WebSocket (Kite/Upstox/Angel One) | Only path to real-time NSE quotes |
+| Cache | Redis | Quote caching, rate-limit budget, dedupe |
+| Delivery | Telegram bot | Digest + alerts, same channel |
+| Indicators | `pandas-ta` + custom | Custom needed for delivery %, efficiency ratio, gold/silver ratio |
 
-**[OPEN]** Confirm this stack, or prefer something else (e.g. Node/TS if that
-fits your existing tooling better)?
+### 4.1 Three data tiers (rate-limit shaped)
+
+Broker APIs cap both WebSocket subscriptions and REST throughput, so
+"real-time for every stock" is really:
+
+| Tier | Scope | Mechanism |
+|---|---|---|
+| 1. Streaming | Watchlist only (bounded, ~tens) | WebSocket subscription |
+| 2. On-demand | Any ticker, when asked | REST quote, short-TTL cached |
+| 3. Batch EOD | Full universe (Nifty 50 → 500) | Nightly bulk pull |
+
+Tier 1 is bounded because streaming thousands of symbols is neither
+necessary nor within quota. Tier 2 gives the "any and every stock" coverage
+without holding open subscriptions for stocks nobody is watching.
+
+**This forces the broker API decision** (scope §8.2) — `yfinance`/bhavcopy
+is EOD-only and cannot serve tiers 1 or 2.
 
 ---
 

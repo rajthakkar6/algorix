@@ -33,6 +33,43 @@ Absolute thresholds are regime-dependent and break when overall volatility
 shifts; ranks are self-normalising. This also makes signals directly
 combinable — every signal becomes a 0–100 percentile on the same scale.
 
+### 0.2a Scoring stocks *outside* the ranked universe — **[OPEN]**
+
+Added when watchlist analysis + any-ticker lookup entered scope
+(PROJECT_SCOPE §3.4–3.5). §0.2 ranks each stock as a percentile **within a
+universe** — but if you watchlist a smallcap, there is no universe for it to
+sit in, and its raw indicator values are not comparable to a Nifty 50
+percentile. Scoring it naively would produce a number that looks like the
+Nifty 50 score but does not mean the same thing.
+
+Three options:
+
+| Option | How | Trade-off |
+|---|---|---|
+| **A. Expand computed universe** | Nightly batch over Nifty 500 / all F&O names; rank within that | Most correct and consistent; heaviest data cost |
+| **B. Sector-peer ranking** | Rank against its own sector cohort | Economically sensible comparison; small cohorts make percentiles noisy |
+| **C. Time-series self-ranking** | Percentile against the stock's *own* history rather than peers | Works for literally any ticker; loses the cross-sectional momentum effect (A1), which is the highest-weighted signal |
+
+**Recommendation: A for the batch universe, C as the fallback** for anything
+outside it — with the score explicitly **labelled** which method produced it.
+A watchlist score and a Nifty 50 scan score must never be silently compared
+when they were computed differently.
+
+### 0.2b Off-universe stocks need filters the Nifty 50 never did
+
+Nifty 50 names are large, liquid and clean, so the MVP could ignore several
+Indian-market hazards. Arbitrary tickers cannot:
+
+- **Liquidity floor** — minimum median traded value; thin stocks produce
+  unfillable signals and unreliable delivery %.
+- **Circuit-limit status** — a stock locked at upper/lower circuit cannot be
+  entered or exited at the scored price.
+- **F&O ban list** — restricted positions.
+- **Promoter pledge %** — see F3; becomes materially relevant here.
+
+These are **eligibility gates**, not score contributors: a stock failing them
+should be reported as ineligible, not scored low.
+
 ### 0.3 Three distinct roles — do not mix them into one number
 A serious failure in retail scoring tools is treating every indicator as a
 directional score contributor. Signals fall into three separate roles:
@@ -220,10 +257,12 @@ feed is obtainable; the constraint is data sourcing in India, not merit.
 ### F2. Bulk & block deals
 Free from NSE, genuine institutional-footprint signal. Moderate parsing work.
 
-### F3. Promoter pledge changes
+### F3. Promoter pledge changes — **promoted, no longer deferred**
 Strong *negative*/risk-flag signal. Low relevance for Nifty 50 (large, clean
-promoters), high relevance when the universe expands to Nifty 500 — defer
-until then.
+promoters) — but watchlist/any-ticker lookup (PROJECT_SCOPE §3.4–3.5) means
+arbitrary smallcaps now enter the system, where pledge risk is exactly where
+retail traders get hurt. Moves into the §0.2b eligibility-gate set rather
+than waiting for a Nifty 500 expansion.
 
 ---
 
