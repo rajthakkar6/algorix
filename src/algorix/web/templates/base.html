@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Algorix{% endblock %}</title>
+<style>
+  :root {
+    --bg: #fbfbfa; --panel: #ffffff; --ink: #1a1a18; --muted: #6b6b66;
+    --line: #e4e4e0; --accent: #2f6f4e; --warn: #9a6b1f; --bad: #9c3328;
+    --good: #2f6f4e; --chip: #f2f2ef;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #17171a; --panel: #1f1f23; --ink: #ececea; --muted: #9a9a93;
+      --line: #32323a; --accent: #7bbd97; --warn: #d8a85a; --bad: #e08172;
+      --good: #7bbd97; --chip: #26262c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 ui-sans-serif, -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  a { color: inherit; }
+  header {
+    border-bottom: 1px solid var(--line); background: var(--panel);
+    position: sticky; top: 0; z-index: 5;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 0 20px; }
+  nav { display: flex; gap: 22px; align-items: baseline; padding: 14px 0; flex-wrap: wrap; }
+  nav .brand { font-weight: 650; letter-spacing: -0.01em; font-size: 17px; }
+  nav a { text-decoration: none; color: var(--muted); font-size: 14px; }
+  nav a:hover, nav a.on { color: var(--ink); }
+  nav .spacer { margin-left: auto; color: var(--muted); font-size: 13px; }
+  main { padding: 26px 0 60px; }
+  h1 { font-size: 20px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  h2 { font-size: 15px; margin: 30px 0 10px; font-weight: 620; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 16px 18px; margin-bottom: 18px;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th {
+    text-align: left; font-weight: 550; color: var(--muted); font-size: 12px;
+    text-transform: uppercase; letter-spacing: 0.04em;
+    padding: 0 10px 8px; border-bottom: 1px solid var(--line); white-space: nowrap;
+  }
+  td { padding: 9px 10px; border-bottom: 1px solid var(--line); }
+  tr:last-child td { border-bottom: none; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .sym { font-weight: 600; text-decoration: none; }
+  .sym:hover { text-decoration: underline; }
+  .score { font-weight: 650; font-variant-numeric: tabular-nums; }
+  .bar {
+    display: inline-block; height: 6px; border-radius: 3px;
+    background: var(--accent); vertical-align: middle; min-width: 2px;
+  }
+  .bar-track {
+    display: inline-block; width: 46px; height: 6px; border-radius: 3px;
+    background: var(--chip); vertical-align: middle; overflow: hidden;
+  }
+  .na { color: var(--muted); cursor: help; }
+  .chip {
+    display: inline-block; padding: 1px 7px; border-radius: 20px;
+    background: var(--chip); font-size: 11px; color: var(--muted);
+  }
+  .banner { border-left: 3px solid var(--line); padding-left: 14px; }
+  .banner.good { border-color: var(--good); }
+  .banner.warn { border-color: var(--warn); }
+  .banner.bad  { border-color: var(--bad); }
+  .banner h3 { margin: 0 0 4px; font-size: 14px; }
+  .banner.good h3 { color: var(--good); }
+  .banner.warn h3 { color: var(--warn); }
+  .banner.bad  h3 { color: var(--bad); }
+  .banner ul { margin: 8px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; }
+  .metrics { display: flex; gap: 28px; flex-wrap: wrap; }
+  .metric .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .metric .v { font-size: 20px; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .pos { color: var(--good); }
+  .neg { color: var(--bad); }
+  .caveat {
+    border-left: 3px solid var(--warn); padding: 8px 0 8px 14px;
+    margin: 10px 0; color: var(--muted); font-size: 13px;
+  }
+  .scroll { overflow-x: auto; }
+  footer { color: var(--muted); font-size: 12px; padding-top: 10px; }
+  @media (max-width: 640px) {
+    .hide-sm { display: none; }
+    .wrap { padding: 0 16px; }
+  }
+</style>
+</head>
+<body>
+<header><div class="wrap"><nav>
+  <span class="brand">Algorix</span>
+  <a href="/" class="{% block n1 %}{% endblock %}">Scan</a>
+  <a href="/backtest" class="{% block n2 %}{% endblock %}">Backtest</a>
+  <a href="/journal" class="{% block n3 %}{% endblock %}">Journal</a>
+  <span class="spacer">{% block ctx %}{% endblock %}</span>
+</nav></div></header>
+<main><div class="wrap">{% block body %}{% endblock %}</div></main>
+<footer><div class="wrap">Scores are analysis, not investment advice.</div></footer>
+</body>
+</html>

@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Journal — Algorix{% endblock %}
+{% block n3 %}on{% endblock %}
+{% block ctx %}{{ sessions|length }} session{{ '' if sessions|length == 1 else 's' }} recorded{% endblock %}
+{% block body %}
+
+<h1>Journal</h1>
+<p class="sub">
+  Every scan, preserved. This is what the scanner actually claimed, and when —
+  the only basis on which the model can later be judged.
+</p>
+
+{% if not sessions %}
+<div class="panel"><p class="sub" style="margin:0">
+  No scans recorded yet. Run <code>python -m algorix.scan</code>.
+</p></div>
+{% else %}
+
+<div class="panel">
+  <h2 style="margin-top:0">Recorded sessions</h2>
+  <p>{% for s in sessions %}<span class="chip" style="margin:2px 4px 2px 0">{{ s }}</span>{% endfor %}</p>
+</div>
+
+<div class="panel scroll">
+  <h2 style="margin-top:0">{{ latest_session }}</h2>
+  <table>
+    <thead><tr>
+      <th>Symbol</th><th class="num">Score</th>
+      <th class="hide-sm">Contributions</th><th class="hide-sm">Regime</th><th class="num hide-sm">Cohort</th>
+    </tr></thead>
+    <tbody>
+    {% for e in entries %}
+      <tr>
+        <td><a class="sym" href="/stock/{{ e.symbol }}">{{ e.symbol }}</a></td>
+        <td class="num"><span class="score">{{ '%.0f'|format(e.score) if e.score is not none else '--' }}</span></td>
+        <td class="hide-sm" style="color:var(--muted);font-size:12px">
+          {% for code, p in e.contributions|dictsort %}{{ code }} {{ '%.0f'|format(p) }}&nbsp;&nbsp;{% endfor %}
+        </td>
+        <td class="hide-sm"><span class="chip">{{ e.regime_verdict or 'n/a' }}</span></td>
+        <td class="num hide-sm" style="color:var(--muted)">{{ e.cohort_size }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

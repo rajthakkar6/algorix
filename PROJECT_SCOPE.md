@@ -9,6 +9,23 @@ Sections marked **[OPEN]** are decisions still needed.
 
 ---
 
+## 0. Build Status
+
+**The MVP morning scanner is built and working end to end** (440 tests).
+
+| Layer | Status |
+|---|---|
+| Data layer — calendar, storage, universe, prices, delivery, metals, orchestration | ✅ |
+| Indicators — A1–A7 score contributors, C1–C2 risk inputs | ✅ |
+| Regime gates — B1 breadth, B2 India VIX, B3 efficiency ratio, B4 FII/DII | ✅ |
+| Composite scoring + eligibility gates + ATR risk sizing | ✅ |
+| Trade journal | ✅ |
+| Telegram digest | ✅ (needs credentials) |
+| Cron scheduling | ✅ (opt-in install) |
+
+Not yet built: watchlist background jobs (§3.4), real-time lookup (§3.5),
+news/sentiment (§3.6), LLM concluder (§3.7).
+
 ## 1. Confirmed Scope
 
 | Decision | Value |
@@ -260,6 +277,29 @@ is EOD-only and cannot serve tiers 1 or 2.
 **[OPEN]** Do you already hold a broker account with API access (Zerodha
 Kite, Upstox, Angel One)? That changes which data source is the default
 rather than a fallback.
+
+### 5.1 Observed feed defects (verified live, Sept 2026)
+
+Every one of these returns **plausible-looking wrong data with a success
+status** — none raises an error. This is why each source has a date-and-shape
+guard rather than a bare try/except.
+
+| Source | Defect | Handling |
+|---|---|---|
+| yfinance | Emits **phantom bars on NSE holidays** — flat OHLC, zero volume (e.g. 2026-09-14 for every symbol) | Rejected via the NSE trading calendar |
+| yfinance | **Silently omits sessions** for individual stocks — 11 of 50 Nifty names were missing 2026-09-17, which NSE's bhavcopy does have | Surfaced by gap detection; backfill **[OPEN]**, see below |
+| yfinance | Returns **NaN prices with real volume** (GOLDBEES/SILVERBEES, 2026-09-18, ~28M volume) | Rejected as incomplete; reported as a gap |
+| yfinance | Returns an **empty frame, not an error**, for delisted/misspelled symbols | Raised as `DataUnavailableError` |
+| NSE bhavcopy | On a holiday, serves the **previous session's file with HTTP 200** | Rejected by comparing the file's own `DATE1` to the requested date |
+| NSE bhavcopy | Writes unpublished delivery as `'-'` (275 of 3508 rows sampled) | Recorded as *unavailable*, never as zero |
+| NSE (both) | Serves an **HTML block page with HTTP 200** when rate-limiting | Detected and refused before parsing |
+
+**[OPEN] Gap backfill.** NSE's bhavcopy carries full OHLC and could fill
+yfinance's missing sessions — but bhavcopy prices are **unadjusted** while
+yfinance's are split/dividend-adjusted. Blending them naively would inject
+artificial jumps at corporate-action dates. A safe backfill would have to
+verify no split or dividend fell between the gap and the present. Deferred as
+its own task; current gaps are 1–2 sessions per affected instrument.
 
 ---
 

@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "algorix"
+version = "0.1.0"
+description = "Personal swing-trading analysis and scoring tool for Indian equities and precious metals"
+requires-python = ">=3.11"
+dependencies = [
+    "exchange-calendars>=4.13",
+    "pandas>=2.2",
+    "requests>=2.32",
+    "yfinance>=0.2.40",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-v --strict-markers"
+markers = [
+    "network: tests that require live network access (deselect with -m 'not network')",
+]

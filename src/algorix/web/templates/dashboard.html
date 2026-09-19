@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}Algorix — {{ as_of }}{% endblock %}
+{% block n1 %}on{% endblock %}
+{% block ctx %}{{ index }} · {{ as_of.strftime('%d %b %Y') }}{% endblock %}
+{% block body %}
+
+<h1>Morning scan</h1>
+<p class="sub">
+  Session {{ as_of }} · {{ universe.ranked()|length }} of {{ universe.scores|length }} scored
+  {% if universe.ineligible %} · {{ universe.ineligible|length }} ineligible{% endif %}
+  {% if universe.unscored %} · {{ universe.unscored|length }} unscored{% endif %}
+</p>
+
+{% set v = regime.verdict|string %}
+<div class="panel">
+  <div class="banner {% if v == 'FAVOURABLE' %}good{% elif v == 'HOSTILE' %}bad{% elif v == 'MIXED' %}warn{% endif %}">
+    <h3>
+      {% if v == 'FAVOURABLE' %}Favourable regime
+      {% elif v == 'MIXED' %}Mixed regime — treat scores with caution
+      {% elif v == 'HOSTILE' %}Hostile regime — scores are less reliable
+      {% else %}Regime unknown — insufficient data{% endif %}
+    </h3>
+    <div class="sub" style="margin:0">{{ regime.summary() }}</div>
+    {% if regime.warnings %}
+    <ul>{% for w in regime.warnings %}<li>{{ w }}</li>{% endfor %}</ul>
+    {% endif %}
+  </div>
+</div>
+
+{% if metals %}
+<div class="panel metrics">
+  <div class="metric"><div class="k">Gold</div><div class="v">${{ '%.0f'|format(metals.gold) }}</div></div>
+  <div class="metric"><div class="k">Silver</div><div class="v">${{ '%.1f'|format(metals.silver) }}</div></div>
+  <div class="metric"><div class="k">Gold/Silver</div><div class="v">{{ '%.1f'|format(metals.ratio) }}</div></div>
+  <div class="metric"><div class="k">USD/INR</div><div class="v">{{ '%.2f'|format(metals.usdinr) }}</div></div>
+</div>
+{% endif %}
+
+<div class="panel scroll">
+<table>
+  <thead><tr>
+    <th class="num">#</th><th>Symbol</th><th class="num">Score</th>
+    {% for code, label in signal_labels.items() %}
+      <th class="num hide-sm" title="{{ code }}">{{ label }}</th>
+    {% endfor %}
+    <th class="num">Close</th><th class="num">Stop</th><th class="num hide-sm">ATR%</th>
+  </tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td class="num" style="color:var(--muted)">{{ r.rank }}</td>
+      <td><a class="sym" href="/stock/{{ r.symbol }}">{{ r.symbol }}</a></td>
+      <td class="num"><span class="score">{{ '%.0f'|format(r.score) }}</span></td>
+      {% for code in signal_labels %}
+        <td class="num hide-sm">
+          {% if code in r.contributions %}
+            {% set p = r.contributions[code] %}
+            <span class="bar-track"><span class="bar" style="width:{{ '%.0f'|format(p * 0.46) }}px"></span></span>
+            <span style="color:var(--muted);font-size:12px">{{ '%.0f'|format(p) }}</span>
+          {% else %}
+            <span class="na" title="no data for this signal">--</span>
+          {% endif %}
+        </td>
+      {% endfor %}
+      <td class="num">{{ '%.1f'|format(r.close) if r.close else '--' }}</td>
+      <td class="num">
+        {% if r.stop and r.stop.available %}{{ r.stop.text }}
+        {% else %}<span class="na" title="{{ r.stop.title if r.stop else '' }}">--</span>{% endif %}
+      </td>
+      <td class="num hide-sm">
+        {% if r.atr_pct and r.atr_pct.available %}{{ r.atr_pct.text }}
+        {% else %}<span class="na">--</span>{% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<p class="sub">
+  Signal columns show each contributor's percentile within the universe.
+  {% if rows %}Scored {{ universe.top(1)[0].method }}, cohort {{ universe.top(1)[0].cohort_size }}.{% endif %}
+</p>
+{% endblock %}
