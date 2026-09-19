@@ -266,6 +266,64 @@ than waiting for a Nifty 500 expansion.
 
 ---
 
+## Bucket G — News & Sentiment (INCLUDE, with deliberate constraints)
+
+Adds the emotional/narrative factor the price-and-volume signals cannot see.
+Genuinely valuable — but it is also **the single most manipulable input in
+the entire model**, so it is scoped defensively.
+
+### G0. Why sentiment is weighted low and gated
+
+Nobody can fake delivery percentage. Anyone can fake sentiment. Indian
+smallcaps in particular have a large, well-documented ecosystem of Telegram
+and X pump groups manufacturing exactly the "surge in positive mentions" a
+naive sentiment scorer rewards — so a bullish sentiment spike on a thin
+stock is often *evidence of a trap, not an opportunity*.
+
+Second problem: **horizon mismatch.** News sentiment decays over hours to
+days; this is a days-to-weeks swing model. Raw sentiment is largely noise at
+the horizon we trade on.
+
+Consequence — sentiment is **not** scored as "positive = buy":
+
+| Use | Verdict |
+|---|---|
+| Event/anomaly detection ("something is happening here") | ✅ Primary use |
+| Contrarian flag at extremes (euphoria = risk) | ✅ Secondary use |
+| Risk/red-flag detection (fraud, regulatory, auditor exit) | ✅ High value |
+| Directional score contributor ("bullish tweets → higher score") | ❌ Rejected |
+
+### G1. NSE/BSE corporate announcements ★ highest-quality source
+Official filings, structured, timestamped, free, and **impossible to
+astroturf**. Results, board meetings, QIPs, pledge changes, auditor
+resignations, regulatory orders. This is the best "news" source available
+and should be prioritized *above* both media and social.
+
+### G2. Mainstream financial news
+Economic Times / Moneycontrol / Livemint / Business Standard RSS + Google
+News RSS. Free, moderate signal, low manipulation risk. Used for event
+detection and risk flags, not direction.
+
+### G3. Social sentiment (X/Twitter) — **[OPEN]**, lowest priority
+- **Cost problem:** X API paid tiers are meaningful recurring spend for a
+  personal tool — plausibly the largest running cost in the project.
+- **Quality problem:** highest manipulation risk of any source (see G0).
+- **Recommendation:** defer to a later phase. If included, restrict to
+  *volume anomaly* (unusual mention spike = investigate) rather than
+  *sentiment polarity*, and never let it raise a score on an illiquid stock.
+
+### G4. Sentiment extraction method
+LLM-based structured extraction, not a lexicon/VADER-style scorer — Indian
+financial text mixes English/Hindi, heavy abbreviation, and sarcasm that
+lexicon scorers handle badly. Per item, extract to a **fixed schema**:
+event type, entities, polarity, materiality, source credibility.
+
+Bulk extraction is a cheap, high-volume classification job — a lighter model
+(Claude Haiku 4.5 or Sonnet 5) with structured outputs, run through the
+**Batch API at 50% cost** since the nightly scan is not latency-sensitive.
+
+---
+
 ## Summary of Changes vs. Current PROJECT_SCOPE.md §3.2
 
 **Remove:** MACD, RSI (as scoped), 20 DMA.

@@ -120,6 +120,91 @@ which is outside the stated trading style.
 arbitrary off-universe ticker has nothing to be ranked against. **[OPEN]**,
 options documented in INDICATORS.md.
 
+### 3.6 News & Sentiment Analyzer
+
+Adds the emotional/narrative factor. Sources, method and the constraints on
+how sentiment may be used are specified in [INDICATORS.md](INDICATORS.md)
+Bucket G — summary: NSE/BSE corporate announcements first (free, structured,
+un-astroturfable), mainstream financial news second, X/social last and
+**[OPEN]** on cost grounds.
+
+Sentiment is used for **event detection, risk flags, and contrarian
+extremes** — deliberately *not* as a "positive mentions → higher score"
+contributor. Rationale in INDICATORS.md §G0.
+
+### 3.7 LLM Concluder
+
+An LLM reviews everything extracted — quant score and its breakdown, news,
+filings, sentiment, risk/eligibility flags — and produces a written
+conclusion.
+
+#### 3.7.1 The constraint that matters: synthesizer, not decider
+
+**The LLM must never silently override or mutate the quantitative score.**
+
+The reason is the whole premise of the project. The quant score is
+reproducible and backtestable — that is what lets the trade journal
+eventually answer "does this system work?". An LLM verdict is
+non-deterministic and cannot be cleanly backtested. If the LLM can overrule
+the score, the primary number becomes unvalidatable and the journal stops
+being evidence.
+
+Worse: an LLM can *always* construct a plausible narrative for either
+direction. Uncritically trusted, it reintroduces exactly the narrative bias
+this tool exists to counteract — with more eloquence than a human would
+manage.
+
+**Therefore:**
+
+| Rule |
+|---|
+| The quant score remains the primary, testable number |
+| The LLM output is a **separate, clearly-labelled qualitative layer** |
+| On disagreement, **surface the conflict** — never average the two into one number |
+| Both are logged to the journal, independently, so each can be scored later |
+
+#### 3.7.2 What the LLM is actually good for here
+
+- **Structured extraction** from unstructured news/filings (this *is* the
+  §3.6 sentiment analyzer).
+- **Explaining** the quant score in plain language.
+- **Qualitative risk flags the quant model structurally cannot see** — QIP
+  announced, auditor resigned, regulatory order, pledge spike.
+- **Red-teaming** — "what would make this trade fail?" Arguably its highest-
+  value role, and the one that most counteracts confirmation bias.
+
+#### 3.7.3 Journal integrity requirements
+
+Because conclusions get logged and compared over months:
+
+- **Structured output** against a fixed schema (`output_config.format`), not
+  free prose — so verdicts stay machine-comparable.
+- **Versioned prompt**; log prompt version + model ID with every verdict.
+  Without this, months of journal entries are uninterpretable because you
+  cannot tell whether the model or the prompt changed underneath them.
+- Verdict schema should include a **confidence** and an explicit
+  **disagrees-with-quant-score** boolean.
+
+#### 3.7.4 Model selection
+
+| Job | Model | Why |
+|---|---|---|
+| Bulk news/sentiment extraction | Claude Haiku 4.5 or Sonnet 5 | High-volume classification/extraction; cheap per item |
+| The concluder itself | **Claude Opus 5** (`claude-opus-5`) | Low volume (one per candidate), high stakes, needs genuine synthesis across conflicting evidence |
+
+Use **adaptive thinking** (`thinking: {type: "adaptive"}`) on the concluder —
+weighing conflicting quantitative and qualitative evidence is exactly the
+case for it.
+
+Run the nightly universe pass through the **Batch API (50% cost)** — the
+morning scan is prepared overnight and is not latency-sensitive. Watchlist
+and on-demand lookups (§3.4–3.5) use the normal synchronous API.
+
+**[OPEN]** Should the concluder run on the full scanned universe every night,
+or only on the top-N ranked candidates plus watchlist names? Top-N is
+materially cheaper and probably sufficient — you do not need a written
+thesis on the 40th-ranked stock.
+
 ---
 
 ## 4. Architecture (revised)
@@ -138,6 +223,8 @@ service, a job queue, and a live data feed.
 | Cache | Redis | Quote caching, rate-limit budget, dedupe |
 | Delivery | Telegram bot | Digest + alerts, same channel |
 | Indicators | `pandas-ta` + custom | Custom needed for delivery %, efficiency ratio, gold/silver ratio |
+| News/sentiment | RSS + NSE announcements feed | Free, structured, low manipulation risk (INDICATORS.md §G1–G2) |
+| LLM | Anthropic `anthropic` SDK — Opus 5 concluder, Haiku 4.5/Sonnet 5 extraction | Structured outputs for journal comparability (§3.7) |
 
 ### 4.1 Three data tiers (rate-limit shaped)
 
@@ -230,6 +317,13 @@ v2+.
    or any from the "beyond MVP" list that should be pulled forward?
    → Addressed in [INDICATORS.md](INDICATORS.md); open indicator-level
    decisions are tracked there.
+7. **[OPEN]** X/Twitter sentiment — include despite recurring API cost, or
+   defer and run on free news + NSE announcements only? (INDICATORS.md §G3)
+8. **[OPEN]** Concluder scope — full universe nightly, or top-N + watchlist
+   only? (§3.7.4)
+9. **[OPEN]** Monthly running-cost ceiling for the whole system (broker API +
+   X API + LLM spend). Worth fixing a number now, since three separate
+   components can each quietly grow into it.
 
 ---
 
