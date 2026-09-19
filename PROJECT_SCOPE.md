@@ -46,6 +46,13 @@ Every score should be traceable to the factors that produced it.
 
 ### 3.2 MVP Scoring Signals
 
+> **Superseded — see [INDICATORS.md](INDICATORS.md)** for the reviewed,
+> evidence-weighted indicator set. The table below was the first-pass
+> proposal and is kept only for history. Key revisions: RSI, MACD and the
+> 20 DMA were cut as redundant; 52-week high proximity, Donchian breakout,
+> ATR and a market regime gate were added; FII/DII was re-classified from a
+> per-stock signal to a market-level gate.
+
 | Category | Signal | Why it's in v1 |
 |---|---|---|
 | Trend | Price vs. 20/50 DMA, MA stack direction | Cheap, reliable, core swing filter |
@@ -57,6 +64,8 @@ Every score should be traceable to the factors that produced it.
 
 Deliberately **excluded from MVP** (see v2+ roadmap): fundamentals, news/sentiment
 NLP, options flow, bulk/block deal data, promoter pledge tracking.
+Exception under review: **PEAD (post-earnings drift)** may be worth pulling
+forward — see INDICATORS.md §F1.
 
 ### 3.3 Trade Journal (minimal, MVP)
 - Every scan's output stored with date + score breakdown.
@@ -149,6 +158,8 @@ v2+.
    — cosmetic but worth deciding once.
 6. **[OPEN]** Any signals in the MVP list above that should be cut further,
    or any from the "beyond MVP" list that should be pulled forward?
+   → Addressed in [INDICATORS.md](INDICATORS.md); open indicator-level
+   decisions are tracked there.
 
 ---
 
