@@ -7,6 +7,8 @@ Read this before doing anything in this repo.
 ```bash
 .venv/bin/python -m algorix.refresh          # bring data up to date
 .venv/bin/python -m algorix.scan --no-send   # score + print the digest
+.venv/bin/python -m algorix.backtest         # IC + quintile spread, with caveats
+.venv/bin/python -m algorix.web              # local dashboard on :8000
 .venv/bin/python -m algorix.schedule         # preview the cron entry
 .venv/bin/python -m pytest -m "not network"  # offline test suite
 ```
@@ -17,7 +19,12 @@ runs, journals, and reports delivery as unconfigured.
 
 Module map: `calendar` → `storage` → `universe`/`ingestion`/`delivery`/
 `metals` → `refresh` (data layer); `series` → `indicators`/`cross_sectional`/
-`regime` → `scoring` → `journal`/`notify` → `scan` (analysis layer).
+`regime` → `scoring` → `journal`/`notify` → `scan` (analysis layer);
+`backtest` and `web` both sit on top and read the same store.
+
+`refresh` is the only module that ingests bars. Anything the analysis layer
+reads a price series for -- index, VIX, metals -- must be registered there,
+or its signal goes silently unavailable forever.
 
 ## What this project is
 

@@ -36,7 +36,8 @@ from algorix.delivery import (
 from algorix.exceptions import AlgorixError, DataUnavailableError
 from algorix.ingestion import IngestReport, YFinanceBarSource, ingest_instrument
 from algorix.metals import METAL_INSTRUMENTS, seed_metal_instruments
-from algorix.models import CalendarPolicy, Exchange, Instrument
+from algorix.models import CalendarPolicy, Exchange, Instrument, InstrumentType
+from algorix.regime import REGIME_INSTRUMENTS, seed_regime_instruments
 from algorix.storage import BarRepository, Database, InstrumentRepository
 from algorix.universe import (
     NIFTY_50,
@@ -194,6 +195,10 @@ def refresh(
             errors.append(f"universe sync failed: {type(exc).__name__}: {exc}")
 
     seed_metal_instruments(db)
+    # The index and India VIX are not index members, so nothing else would
+    # pull them in -- yet B2 and B3 are computed from them. Without this the
+    # two gates silently report unavailable forever.
+    seed_regime_instruments(db)
 
     # -- assemble the instrument set --------------------------------------
     instruments = _instruments_to_refresh(db, target, index_symbol)
@@ -242,10 +247,14 @@ def refresh(
     delivery_required = 0
 
     if not skip_delivery:
+        # Indices trade on NSE but never appear in the bhavcopy delivery
+        # file, so including them would report them missing on every run --
+        # permanent noise that would bury a real gap.
         equity_ids = {
             instrument.symbol: instrument_id
             for instrument, instrument_id in instruments
             if instrument.exchange is Exchange.NSE
+            and instrument.instrument_type is not InstrumentType.INDEX
         }
         if equity_ids:
             client = bhavcopy_client or NseBhavcopyClient()
@@ -323,7 +332,7 @@ def _delivery_sessions_needed(
 def _instruments_to_refresh(
     db: Database, target: date, index_symbol: str = NIFTY_50
 ) -> list[tuple[Instrument, int]]:
-    """Current index members plus the metals track, de-duplicated."""
+    """Current index members plus the metals and regime tracks, de-duplicated."""
     instrument_repository = InstrumentRepository(db)
     constituency = ConstituencyRepository(db)
 
@@ -334,7 +343,7 @@ def _instruments_to_refresh(
         if stored is not None:
             wanted[f"{stored.exchange}:{stored.symbol}"] = stored
 
-    for instrument in METAL_INSTRUMENTS:
+    for instrument in (*METAL_INSTRUMENTS, *REGIME_INSTRUMENTS):
         stored = instrument_repository.get(instrument.symbol, instrument.exchange)
         if stored is not None:
             wanted[f"{stored.exchange}:{stored.symbol}"] = stored

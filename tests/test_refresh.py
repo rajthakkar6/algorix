@@ -504,3 +504,58 @@ def test_one_missing_bhavcopy_does_not_abort_the_backfill(db, cal):
     assert date(2026, 9, 16) not in present
     assert TARGET in present
     assert any("2026-09-16" in e for e in report.errors)
+
+
+# --------------------------------------------------------------------------
+# Regime instruments (B2 India VIX, B3 efficiency ratio)
+#
+# These are not index members, so nothing in the universe sync pulls them in.
+# Before this was wired up they were seeded by the scanner but never ingested,
+# leaving both gates permanently unavailable without anything saying so.
+# --------------------------------------------------------------------------
+
+
+def test_refresh_includes_regime_instruments(db, cal):
+    """The index and VIX are refreshed alongside the metals track."""
+    report = run(db, cal)
+
+    symbols = {r.symbol for r in report.bar_reports}
+    assert {"NIFTY50", "INDIAVIX"} <= symbols
+
+
+def test_regime_instruments_get_bars_stored(db, cal):
+    """Bars actually land -- a report entry alone would not feed the gates."""
+    run(db, cal)
+
+    repository = InstrumentRepository(db)
+    bars = BarRepository(db)
+    for symbol in ("NIFTY50", "INDIAVIX"):
+        instrument = repository.get(symbol, Exchange.NSE)
+        assert instrument is not None, f"{symbol} was never seeded"
+        assert bars.latest_session(instrument.id) == TARGET
+
+
+def test_indices_are_excluded_from_delivery(db, cal):
+    """Indices are absent from the bhavcopy file by nature, not by fault.
+
+    Reporting them as missing every single run would be permanent noise, and
+    noise is what hides a real gap.
+    """
+    report = run(db, cal)
+
+    assert report.delivery is not None
+    missing = set(report.delivery.not_in_file) | set(report.delivery.unavailable)
+    assert not ({"NIFTY50", "INDIAVIX"} & missing)
+
+
+def test_regime_instrument_failure_is_collected_not_fatal(db, cal):
+    """A dead VIX feed must not abandon the rest of the refresh."""
+    report = run(db, cal, bar_source=FakeBarSource(fail_symbols=("INDIAVIX",)))
+
+    symbols = {r.symbol for r in report.bar_reports}
+    assert "INDIAVIX" not in symbols
+    # The equities and the index still landed.
+    assert {"RELIANCE", "TCS", "NIFTY50"} <= symbols
+    # And the failure is visible rather than swallowed.
+    assert any("INDIAVIX" in e for e in report.errors)
+    assert not report.is_clean

@@ -11,7 +11,9 @@ Sections marked **[OPEN]** are decisions still needed.
 
 ## 0. Build Status
 
-**The MVP morning scanner is built and working end to end** (440 tests).
+**The MVP morning scanner is built and working end to end** (485 tests),
+and has now been run against live data: 57 instruments, ~28.5k bars, a
+full 31-session delivery window, and all four regime gates reporting.
 
 | Layer | Status |
 |---|---|
@@ -22,9 +24,19 @@ Sections marked **[OPEN]** are decisions still needed.
 | Trade journal | ✅ |
 | Telegram digest | ✅ (needs credentials) |
 | Cron scheduling | ✅ (opt-in install) |
+| Local web UI — dashboard, stock detail, backtest, journal | ✅ |
+| Backtest / signal evaluation (IC, quintile spread) | ✅ |
 
 Not yet built: watchlist background jobs (§3.4), real-time lookup (§3.5),
 news/sentiment (§3.6), LLM concluder (§3.7).
+
+**Open finding — the scored universe shows no edge yet.** The first live
+backtest (121 sessions to 2026-09-23) returns a slightly *negative* rank
+IC (-0.03 at 5d, -0.06 at 20d) and a negative top-minus-bottom quintile
+spread. The run's own caveats -- survivorship bias, delivery history
+starting 2026-08-11, retroactively adjusted prices -- mean this is not yet
+conclusive either way, but it is the thing to resolve before the scores are
+trusted or the weights are tuned further.
 
 ## 1. Confirmed Scope
 
