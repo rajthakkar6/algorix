@@ -9,6 +9,7 @@ from algorix.exceptions import (
     DataUnavailableError,
     SourceUnreachableError,
 )
+from algorix.models import Exchange
 from algorix.storage import Database
 from algorix.universe import (
     NIFTY_50,
@@ -77,6 +78,20 @@ def test_record_maps_to_yfinance_symbol():
 
     assert instrument.symbol == "TCS"
     assert instrument.yahoo_symbol == "TCS.NS"
+
+
+def test_record_carries_industry_to_instrument():
+    instrument = ConstituentRecord(
+        symbol="TCS", name="TCS Ltd.", industry="Information Technology"
+    ).to_instrument()
+
+    assert instrument.industry == "Information Technology"
+
+
+def test_record_with_no_industry_maps_to_none():
+    instrument = ConstituentRecord(symbol="TCS", name="TCS Ltd.").to_instrument()
+
+    assert instrument.industry is None
 
 
 # -- Parsing -- negative ----------------------------------------------------
@@ -162,6 +177,43 @@ def test_rebalance_adds_and_removes(repo):
     assert result.added == ["INFY"]
     assert result.removed == ["TCS"]
     assert repo.current_constituents(NIFTY_50) == ["INFY", "RELIANCE"]
+
+
+def test_sync_persists_industry_for_new_members(repo):
+    repo.sync(
+        NIFTY_50,
+        [ConstituentRecord(symbol="TCS", name="TCS Ltd.", industry="Information Technology")],
+        date(2026, 9, 18),
+    )
+
+    stored = repo.instruments.get("TCS", Exchange.NSE)
+    assert stored is not None
+    assert stored.industry == "Information Technology"
+
+
+def test_sync_refreshes_industry_for_unchanged_members(repo):
+    """A reclassification must reach storage even when membership doesn't change.
+
+    Membership tracking used to only touch the instrument row for newly
+    added symbols, so an existing member's sector was written once and then
+    frozen -- a real NSE reclassification would never be picked up again.
+    """
+    repo.sync(
+        NIFTY_50,
+        [ConstituentRecord(symbol="ADANIENT", name="Adani Enterprises", industry="Metals & Mining")],
+        date(2026, 9, 18),
+    )
+
+    result = repo.sync(
+        NIFTY_50,
+        [ConstituentRecord(symbol="ADANIENT", name="Adani Enterprises", industry="Services")],
+        date(2026, 9, 21),
+    )
+
+    assert result.unchanged == ["ADANIENT"]
+    stored = repo.instruments.get("ADANIENT", Exchange.NSE)
+    assert stored is not None
+    assert stored.industry == "Services"
 
 
 def test_sync_from_parsed_csv(db):

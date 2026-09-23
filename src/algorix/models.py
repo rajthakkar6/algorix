@@ -62,6 +62,10 @@ class Instrument:
     yahoo_symbol: str | None = None
     is_active: bool = True
     calendar_policy: CalendarPolicy = CalendarPolicy.NSE
+    #: NSE's own sector classification (e.g. "Information Technology"),
+    #: carried through from the index constituent feed. None for instruments
+    #: that don't have one (metals, indices, FX) or haven't synced yet.
+    industry: str | None = None
     id: int | None = None
 
     def __post_init__(self) -> None:

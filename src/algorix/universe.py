@@ -93,6 +93,7 @@ class ConstituentRecord:
             name=self.name,
             # yfinance addresses NSE equities with a .NS suffix.
             yahoo_symbol=f"{self.symbol}.NS",
+            industry=self.industry,
         )
 
 
@@ -248,6 +249,13 @@ class ConstituencyRepository:
         for symbol in added:
             instrument_id = self.instruments.upsert(incoming[symbol].to_instrument())
             self._open_membership(index_symbol, instrument_id, effective_date)
+
+        # Membership does not change here, but classification can -- NSE
+        # occasionally reclassifies a name's sector without it ever leaving
+        # the index. upsert() is idempotent, so refreshing every unchanged
+        # member is a free correctness improvement, not extra state.
+        for symbol in unchanged:
+            self.instruments.upsert(incoming[symbol].to_instrument())
 
         for symbol in removed:
             self._close_membership(index_symbol, symbol, effective_date)

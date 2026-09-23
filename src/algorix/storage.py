@@ -132,6 +132,17 @@ CREATE TABLE IF NOT EXISTS market_flows (
 );
 """
 
+# NSE's own index constituent feed carries a sector classification
+# ("Industry") that was being parsed into ConstituentRecord and then
+# discarded -- nothing persisted it. It is free (same request already made
+# for the universe sync) and is the input C3 (sector concentration) and any
+# future sector-relative scoring need. Nullable: metals, indices and FX have
+# no sector, and existing rows predate this column.
+_SCHEMA_V5 = """
+ALTER TABLE instruments
+    ADD COLUMN industry TEXT;
+"""
+
 #: Ordered migrations. Each runs once, in version order, against databases
 #: older than it. Never edit a migration that has shipped -- add a new one.
 _MIGRATIONS: list[tuple[int, str]] = [
@@ -139,6 +150,7 @@ _MIGRATIONS: list[tuple[int, str]] = [
     (2, _SCHEMA_V2),
     (3, _SCHEMA_V3),
     (4, _SCHEMA_V4),
+    (5, _SCHEMA_V5),
 ]
 
 SCHEMA_VERSION = _MIGRATIONS[-1][0]
@@ -229,15 +241,20 @@ class InstrumentRepository:
                 """
                 INSERT INTO instruments
                     (symbol, exchange, instrument_type, name, yahoo_symbol,
-                     is_active, calendar_policy, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     is_active, calendar_policy, industry, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (symbol, exchange) DO UPDATE SET
                     instrument_type = excluded.instrument_type,
                     name            = COALESCE(excluded.name, instruments.name),
                     yahoo_symbol    = COALESCE(excluded.yahoo_symbol,
                                                instruments.yahoo_symbol),
                     is_active       = excluded.is_active,
-                    calendar_policy = excluded.calendar_policy
+                    calendar_policy = excluded.calendar_policy,
+                    -- NSE occasionally serves the constituent list without
+                    -- Industry populated; do not let a transient miss erase
+                    -- a value already on record.
+                    industry        = COALESCE(excluded.industry,
+                                               instruments.industry)
                 """,
                 (
                     instrument.symbol,
@@ -247,6 +264,7 @@ class InstrumentRepository:
                     instrument.yahoo_symbol,
                     int(instrument.is_active),
                     str(instrument.calendar_policy),
+                    instrument.industry,
                     _utc_now_iso(),
                 ),
             )
@@ -518,4 +536,5 @@ def _row_to_instrument(row: sqlite3.Row) -> Instrument:
         yahoo_symbol=row["yahoo_symbol"],
         is_active=bool(row["is_active"]),
         calendar_policy=CalendarPolicy(row["calendar_policy"]),
+        industry=row["industry"],
     )

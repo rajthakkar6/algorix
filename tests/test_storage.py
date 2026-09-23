@@ -272,6 +272,89 @@ def test_upsert_does_not_erase_existing_name_with_none(instruments):
     assert stored.yahoo_symbol == "INFY.NS"
 
 
+def test_upsert_stores_industry(instruments):
+    """NSE's sector classification round-trips through storage."""
+    instruments.upsert(
+        Instrument(
+            symbol="INFY",
+            exchange=Exchange.NSE,
+            instrument_type=InstrumentType.EQUITY,
+            name="Infosys",
+            industry="Information Technology",
+        )
+    )
+
+    stored = instruments.get("INFY", Exchange.NSE)
+    assert stored is not None
+    assert stored.industry == "Information Technology"
+
+
+def test_industry_defaults_to_none(instruments):
+    """Instruments with no sector (metals, indices, FX) are not forced to one."""
+    instruments.upsert(
+        Instrument(
+            symbol="GOLDUSD",
+            exchange=Exchange.COMEX,
+            instrument_type=InstrumentType.COMMODITY,
+        )
+    )
+
+    stored = instruments.get("GOLDUSD", Exchange.COMEX)
+    assert stored is not None
+    assert stored.industry is None
+
+
+def test_upsert_does_not_erase_existing_industry_with_none(instruments):
+    """A refresh that omits industry must not blank a value already on record.
+
+    Mirrors test_upsert_does_not_erase_existing_name_with_none -- the same
+    partial-refresh hazard, for the same reason.
+    """
+    instruments.upsert(
+        Instrument(
+            symbol="INFY",
+            exchange=Exchange.NSE,
+            instrument_type=InstrumentType.EQUITY,
+            industry="Information Technology",
+        )
+    )
+    instruments.upsert(
+        Instrument(
+            symbol="INFY",
+            exchange=Exchange.NSE,
+            instrument_type=InstrumentType.EQUITY,
+        )
+    )
+
+    stored = instruments.get("INFY", Exchange.NSE)
+    assert stored is not None
+    assert stored.industry == "Information Technology"
+
+
+def test_upsert_reclassifies_industry(instruments):
+    """A genuine reclassification (not a missing value) does take effect."""
+    instruments.upsert(
+        Instrument(
+            symbol="ADANIENT",
+            exchange=Exchange.NSE,
+            instrument_type=InstrumentType.EQUITY,
+            industry="Metals & Mining",
+        )
+    )
+    instruments.upsert(
+        Instrument(
+            symbol="ADANIENT",
+            exchange=Exchange.NSE,
+            instrument_type=InstrumentType.EQUITY,
+            industry="Services",
+        )
+    )
+
+    stored = instruments.get("ADANIENT", Exchange.NSE)
+    assert stored is not None
+    assert stored.industry == "Services"
+
+
 def test_same_symbol_on_two_exchanges_is_distinct(instruments):
     nse = instruments.upsert(
         Instrument(
