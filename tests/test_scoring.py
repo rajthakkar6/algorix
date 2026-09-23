@@ -136,6 +136,122 @@ def test_score_records_its_method_and_cohort():
     assert top.cohort_size == len(STANDARD)
 
 
+# ---------------------------------------------------------------------------
+# Sector-neutral scoring
+# ---------------------------------------------------------------------------
+
+#: Rates shaped like the real Sep 2026 finding: an entire sector (IT) is
+#: the market's five weakest names, with nothing below it, while every
+#: other sector is too small (<=2 members) to get its own baseline.
+SECTOR_PILEUP_RATES = {
+    "TCS": 0.00001, "INFY": 0.00002, "WIPRO": 0.00003,
+    "HCLTECH": 0.00004, "TECHM": 0.00005,
+    "RELIANCE": 0.00010, "ONGC": 0.00020, "ITC": 0.00030,
+    "TITAN": 0.00040, "MARUTI": 0.00050,
+    "AXISBANK": 0.00060, "SBIN": 0.00070,
+}
+SECTOR_PILEUP_MAP = {
+    "TCS": "IT", "INFY": "IT", "WIPRO": "IT", "HCLTECH": "IT", "TECHM": "IT",
+    "RELIANCE": "Energy", "ONGC": "Energy", "ITC": "FMCG",
+    "TITAN": "Consumer", "MARUTI": "Auto",
+    "AXISBANK": "Financials", "SBIN": "Financials",
+}
+
+
+def test_sector_neutral_method_is_labelled():
+    """Principle 0.2a/5 -- a sector-neutral score is a different claim from
+    a plain cross-sectional one and must say so."""
+    universe = scored(SECTOR_PILEUP_RATES, industry_by_symbol=SECTOR_PILEUP_MAP)
+
+    top = universe.top(1)[0]
+
+    assert top.method == "cross-sectional:NIFTY50:sector-neutral"
+
+
+def test_without_industry_data_score_is_unaffected():
+    """No sector data supplied must reproduce the exact pre-existing
+    behaviour -- every caller that does not pass industry_by_symbol keeps
+    working exactly as before this feature existed."""
+    plain = scored(SECTOR_PILEUP_RATES)
+    explicit_none = scored(SECTOR_PILEUP_RATES, industry_by_symbol=None)
+
+    for symbol in SECTOR_PILEUP_RATES:
+        assert plain.scores[symbol].score.value == pytest.approx(
+            explicit_none.scores[symbol].score.value
+        )
+        assert plain.scores[symbol].method == "cross-sectional:NIFTY50"
+
+
+def test_sector_pileup_no_longer_buries_the_sector():
+    """The concrete failure this was built for: TECHM is IT's strongest
+    name, but with the whole sector sitting at the bottom of the universe
+    and nothing below it, a plain cross-sectional score cannot tell "IT's
+    best" from "the market's worst." Sector-neutral scoring must be able to.
+    """
+    plain = scored(SECTOR_PILEUP_RATES)
+    neutral = scored(SECTOR_PILEUP_RATES, industry_by_symbol=SECTOR_PILEUP_MAP)
+
+    non_it = ["RELIANCE", "ONGC", "ITC", "TITAN", "MARUTI", "AXISBANK", "SBIN"]
+
+    # Plain: TECHM (IT's best) still loses to every single non-IT name --
+    # the sector's shared weakness swamps its own relative strength.
+    assert plain.scores["TECHM"].score.value < min(
+        plain.scores[s].score.value for s in non_it
+    )
+
+    # Sector-neutral: TECHM now beats at least one non-IT name.
+    assert neutral.scores["TECHM"].score.value > min(
+        neutral.scores[s].score.value for s in non_it
+    )
+
+
+def test_sector_neutral_preserves_true_raw_value_for_display():
+    """Demeaning must only change what feeds the ranking -- the Contribution
+    breakdown shown to the user must still show the real, human-readable
+    number (e.g. actual % of 52-week high), not a sector-adjusted delta
+    that would be meaningless on a dashboard.
+    """
+    plain = scored(SECTOR_PILEUP_RATES)
+    neutral = scored(SECTOR_PILEUP_RATES, industry_by_symbol=SECTOR_PILEUP_MAP)
+
+    def raw_of(universe, code):
+        contributions = universe.scores["TECHM"].contributions
+        return next(c.raw.value for c in contributions if c.code == code)
+
+    for code in ("A1", "A2", "A3", "A4"):
+        assert raw_of(plain, code) == pytest.approx(raw_of(neutral, code)), (
+            f"{code}'s displayed raw value must not change when the "
+            "ranking underneath it is sector-demeaned"
+        )
+    # The percentile *is* expected to change -- that's the entire point.
+    plain_a1 = next(
+        c.percentile for c in plain.scores["TECHM"].contributions if c.code == "A1"
+    )
+    neutral_a1 = next(
+        c.percentile for c in neutral.scores["TECHM"].contributions if c.code == "A1"
+    )
+    assert neutral_a1 != plain_a1
+
+
+def test_sector_neutral_leaves_pullback_and_delivery_untouched():
+    """A5 (short-term reversal) and A6 (delivery) are different effects
+    from the momentum/trend family and did not show the sector-pileup
+    pattern -- only A1-A4 should move when sector data is supplied."""
+    plain = scored(SECTOR_PILEUP_RATES)
+    neutral = scored(SECTOR_PILEUP_RATES, industry_by_symbol=SECTOR_PILEUP_MAP)
+
+    def percentile_of(universe, symbol, code):
+        return next(
+            c.percentile for c in universe.scores[symbol].contributions
+            if c.code == code
+        )
+
+    for symbol in SECTOR_PILEUP_RATES:
+        assert percentile_of(plain, symbol, "A6") == pytest.approx(
+            percentile_of(neutral, symbol, "A6")
+        )
+
+
 def test_contributions_are_recorded_for_explainability():
     universe = scored(STANDARD)
 

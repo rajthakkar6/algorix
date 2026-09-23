@@ -98,6 +98,40 @@ drawdown. **The regime gate is what separates this tool from a screener.**
 
 These carry actual predictive claims and are mutually complementary.
 
+### A1-A4 sector-neutral demeaning (Sep 2026, added post-launch)
+
+A holdout test (score on 2026-06-30, evaluate against July's actual returns)
+found every Nifty 50 IT name occupying the bottom five ranks together, then
+IT rallied 9-27% in July. A1-A4 all measure some form of "price has risen
+recently" (per 0.1 above, they were already known to be near-redundant), so
+when a sector moves as a block, all four agree and the whole sector piles up
+at one end of the ranking together — indistinguishable from a genuinely weak
+individual stock.
+
+**Fix:** A1-A4's raw values are demeaned against their sector's own average
+before cross-sectional ranking, so the question changes from "is this stock
+strong against the whole universe" to "is this stock strong for its sector."
+A5 (short-term reversal) and A6 (delivery) are different effects and did not
+show the pileup pattern, so they are left on the plain universe-wide
+comparison. Nifty 50 has several sectors with only one or two members
+(Telecommunication, Construction, Capital Goods), so a sector below
+`MIN_SECTOR_SIZE` (3) falls back to the *universe* mean rather than passing
+through raw — an earlier version of this left small sectors raw while large
+ones were recentred, which put them on different scales and made a
+large-sector pileup at an extreme *worse*, not better, once ranked together.
+
+Verified against the actual July 2026 holdout that motivated it: top-minus-
+bottom quintile spread went from -7.85% to +1.13%. Verified across all six
+non-overlapping 20-session windows since March 2026: composite IC went from
+-0.089 (t=-1.49) to +0.005 (t=+0.08) — closer to zero, i.e. the pileup
+distortion is gone, but still not a statistically significant *positive*
+signal at n=6. This fixes an observed structural failure; it does not, by
+itself, establish that the score predicts returns. See PROJECT_SCOPE §0.
+
+Scores computed before this change and after it are not comparable — see
+`journal.SCORING_VERSION` (bumped 1→2) and `StockScore.method`, which now
+reads `cross-sectional:NIFTY50:sector-neutral` for scores that used it.
+
 ### A1. Cross-sectional relative momentum ★ highest weight
 - **What:** stock return vs. universe, over multiple windows — 1M, 3M, and
   6M or 12M-skip-1M (skip the most recent month to avoid short-term reversal

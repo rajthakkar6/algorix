@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from algorix.calendar import TradingCalendar
-from algorix.cross_sectional import UniverseMomentum, rank_percentile
+from algorix.cross_sectional import UniverseMomentum, rank_percentile, sector_demean
 from algorix.indicators import (
     atr_percent,
     average_true_range,
@@ -260,6 +260,16 @@ def _trend_to_score(series: PriceSeries, calendar) -> IndicatorValue:
     return IndicatorValue.of(sum(flags) / len(flags) * 100.0)
 
 
+#: Contributors that all measure some form of "price has risen recently"
+#: (INDICATORS.md's own diagnosis: A2-A4 are restatements of A1, not
+#: independent evidence). A concentrated sector move shows up in all four
+#: together, which is what put every Nifty 50 IT name in the bottom five
+#: ranks in the Sep 2026 walk-forward test. A5 (short-term reversal) and A6
+#: (delivery accumulation) are different effects and did not show the same
+#: pileup, so they are left on the raw universe-wide comparison.
+SECTOR_DEMEANED_CONTRIBUTORS = ("A1", "A2", "A3", "A4")
+
+
 def score_universe(
     series_by_symbol: dict[str, PriceSeries],
     momentum: UniverseMomentum,
@@ -267,6 +277,7 @@ def score_universe(
     delivery_by_symbol: dict[str, list[DeliveryRecord]] | None = None,
     calendar: TradingCalendar | None = None,
     universe_label: str = "NIFTY50",
+    industry_by_symbol: dict[str, str | None] | None = None,
 ) -> ScoredUniverse:
     """Score every instrument against its peers.
 
@@ -274,8 +285,18 @@ def score_universe(
       A1 momentum composite, A2 52-week high proximity, A3 trend state,
       A4 Donchian position (confirmed by A7 relative volume),
       A5 short-term pullback (inverted), A6 delivery trend.
+
+    When `industry_by_symbol` is supplied, A1-A4 are demeaned against their
+    sector's average before ranking -- see `sector_demean`. Without it, this
+    behaves exactly as it did before that existed: a plain cross-sectional
+    score. The two are not the same claim, so the method label records
+    which one ran (design principle 0.2a/5) and the journal's
+    `SCORING_VERSION` was bumped when this was introduced, so a session
+    scored the old way and one scored the new way are never silently
+    compared as though comparable.
     """
     delivery_by_symbol = delivery_by_symbol or {}
+    sector_neutral = bool(industry_by_symbol)
 
     raw: dict[str, dict[str, IndicatorValue]] = {
         "A1": {},
@@ -319,7 +340,21 @@ def score_universe(
 
         raw["A6"][symbol] = delivery_trend(delivery_by_symbol.get(symbol, []))
 
-    rankings = {code: rank_percentile(values) for code, values in raw.items()}
+    # `raw` keeps the true, human-readable values (52w-high %, trend flag
+    # average, ...) for the Contribution breakdown shown to the user.
+    # Demeaning only changes what feeds the percentile ranking below --
+    # never what gets displayed as "why" a score is what it is.
+    ranking_input = {
+        code: (
+            sector_demean(values, industry_by_symbol)
+            if code in SECTOR_DEMEANED_CONTRIBUTORS
+            else values
+        )
+        for code, values in raw.items()
+    }
+    rankings = {
+        code: rank_percentile(values) for code, values in ranking_input.items()
+    }
 
     labels = {
         "A1": ("momentum", "relative momentum"),
@@ -377,7 +412,11 @@ def score_universe(
             eligible=not ineligible,
             ineligible_reasons=ineligible,
             risk=risk,
-            method=f"cross-sectional:{universe_label}",
+            method=(
+                f"cross-sectional:{universe_label}:sector-neutral"
+                if sector_neutral
+                else f"cross-sectional:{universe_label}"
+            ),
             cohort_size=cohort,
         )
 

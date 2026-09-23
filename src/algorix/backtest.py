@@ -288,6 +288,7 @@ def replay_session(
     delivery: dict[str, list[DeliveryRecord]],
     calendar: TradingCalendar | None = None,
     universe_label: str = NIFTY_50,
+    industry_by_symbol: dict[str, str | None] | None = None,
 ) -> ScoredUniverse:
     """Score one historical session using only data available then."""
     truncated = {
@@ -309,6 +310,7 @@ def replay_session(
         delivery_by_symbol=trimmed_delivery,
         calendar=calendar,
         universe_label=universe_label,
+        industry_by_symbol=industry_by_symbol,
     )
 
 
@@ -356,12 +358,14 @@ def run_backtest(
     # Load each instrument's full history once, then slice per session.
     full_series: dict[str, PriceSeries] = {}
     delivery: dict[str, list[DeliveryRecord]] = {}
+    industry_by_symbol: dict[str, str | None] = {}
     earliest_delivery: date | None = None
 
     for symbol in symbols:
         instrument = instrument_repo.get(symbol, Exchange.NSE)
         if instrument is None or instrument.id is None:
             continue
+        industry_by_symbol[symbol] = instrument.industry
         series = load_series(
             db,
             instrument.id,
@@ -417,7 +421,8 @@ def run_backtest(
 
     for session in sessions:
         universe = replay_session(
-            session, full_series, delivery, calendar, index_symbol
+            session, full_series, delivery, calendar, index_symbol,
+            industry_by_symbol=industry_by_symbol,
         )
         ranked = [s for s in universe.scores.values() if s.score.available]
 

@@ -6,9 +6,11 @@ import pytest
 
 from algorix.cross_sectional import (
     MIN_COHORT,
+    MIN_SECTOR_SIZE,
     Ranking,
     compute_universe_momentum,
     rank_percentile,
+    sector_demean,
 )
 from algorix.indicators import MOMENTUM_12M, MOMENTUM_SKIP, total_return
 from algorix.models import Bar
@@ -309,3 +311,166 @@ def test_rankings_are_exposed_per_window():
 
     assert set(universe.rankings) == {"1m", "3m", "12m"}
     assert universe.rankings["3m"].is_usable
+
+
+# ---------------------------------------------------------------------------
+# sector_demean
+# ---------------------------------------------------------------------------
+
+
+def iv(x: float) -> IndicatorValue:
+    return IndicatorValue.of(x)
+
+
+def test_sector_demean_fixes_a_sector_pileup():
+    """The concrete failure this exists for: an entire sector clustered at
+    one end of the ranking, indistinguishable from a genuinely weak stock.
+
+    Five IT names all around momentum 10 (the Sep 2026 pattern -- IT held
+    the bottom five ranks together) against five other-sector names spread
+    from -5 to 15. Before demeaning, every IT name loses to every spread-out
+    peer. After, an IT name that is merely average *for IT* lands in the
+    middle of the demeaned distribution instead of the bottom.
+    """
+    raw = {
+        "TCS": iv(9.0), "INFY": iv(10.0), "WIPRO": iv(11.0),
+        "HCLTECH": iv(10.5), "TECHM": iv(9.5),
+        "RELIANCE": iv(-5.0), "ONGC": iv(0.0), "ITC": iv(5.0),
+        "TITAN": iv(10.0), "MARUTI": iv(15.0),
+    }
+    sector = {
+        "TCS": "IT", "INFY": "IT", "WIPRO": "IT", "HCLTECH": "IT", "TECHM": "IT",
+        "RELIANCE": "Energy", "ONGC": "Energy", "ITC": "FMCG",
+        "TITAN": "Consumer", "MARUTI": "Auto",
+    }
+
+    demeaned = sector_demean(raw, sector)
+
+    # IT's own mean (10.0) is now the IT names' zero point -- INFY, sitting
+    # exactly on its sector's mean, is no longer indistinguishable from
+    # RELIANCE at -5. It is now near the middle of the whole set, not the
+    # bottom of it.
+    it_values = sorted(demeaned[s].value for s in ("TCS", "INFY", "WIPRO", "HCLTECH", "TECHM"))
+    assert it_values == pytest.approx([-1.0, -0.5, 0.0, 0.5, 1.0])
+
+    ranking = rank_percentile(demeaned)
+    infy_percentile = ranking.percentile_of("INFY").value
+    assert 30 < infy_percentile < 70, (
+        f"INFY (sector-average IT) should land mid-table after demeaning, "
+        f"got percentile {infy_percentile}"
+    )
+
+
+def test_sector_demean_preserves_real_intra_sector_spread():
+    """Demeaning must not flatten genuine differences within a sector --
+    only the sector's shared component should be removed."""
+    raw = {"A": iv(20.0), "B": iv(10.0), "C": iv(0.0)}
+    sector = {"A": "X", "B": "X", "C": "X"}
+
+    demeaned = sector_demean(raw, sector)
+
+    assert demeaned["A"].value > demeaned["B"].value > demeaned["C"].value
+    assert demeaned["A"].value - demeaned["C"].value == pytest.approx(20.0)
+
+
+def test_sector_demean_below_min_size_falls_back_to_universe_mean():
+    """A sector with fewer than MIN_SECTOR_SIZE members has no meaningful
+    average of its own -- but it must still be demeaned against *something*
+    on the same scale as everyone else, or it silently stays on a different
+    footing than sector-demeaned peers.
+
+    This is not a hypothetical: leaving such a stock at its raw, un-demeaned
+    value was the actual bug this test replaces. When a large sector's
+    demeaned block sits at one extreme with nothing below it (IT's real
+    Sep 2026 shape), an un-demeaned small-sector stock beside it does not
+    land "unaffected" -- it ends up on the wrong side of a scale comparison
+    that no longer means what it looks like it means.
+    """
+    assert MIN_SECTOR_SIZE >= 2  # the scenario below needs this to hold
+    raw = {"LONE": iv(42.0), "A": iv(1.0), "B": iv(2.0)}
+    sector = {"LONE": "Telecom", "A": "IT", "B": "IT"}
+
+    demeaned = sector_demean(raw, sector, min_sector_size=3)
+
+    # Universe mean of the three raw values is 15.0 -- LONE lands at
+    # 42 - 15 = 27, not at its untouched raw 42.
+    assert demeaned["LONE"].value == pytest.approx(27.0)
+    # A and B's sector (IT) is also below the floor here, so they get the
+    # same universe-mean baseline -- their relative order among themselves
+    # is unchanged, which is the actual guarantee: rank preserved, scale
+    # made comparable.
+    assert demeaned["A"].value < demeaned["B"].value
+
+
+def test_sector_demean_unknown_sector_uses_universe_mean():
+    """A stock with no recorded sector is not evidence of anything, but it
+    still needs a same-scale baseline rather than being left raw among
+    values everyone else has had a mean subtracted from."""
+    raw = {"UNCLASSIFIED": iv(7.0), "A": iv(1.0), "B": iv(2.0), "C": iv(3.0)}
+    sector = {"A": "IT", "B": "IT", "C": "IT"}  # UNCLASSIFIED absent
+
+    demeaned = sector_demean(raw, sector)
+
+    # Universe mean of all four raw values is 3.25.
+    assert demeaned["UNCLASSIFIED"].value == pytest.approx(7.0 - 3.25)
+
+
+def test_sector_demean_unavailable_values_pass_through():
+    """A stock that could not be scored at all stays unscored, not zeroed."""
+    raw = {
+        "MISSING": IndicatorValue.unavailable("insufficient history"),
+        "A": iv(1.0), "B": iv(2.0), "C": iv(3.0),
+    }
+    sector = {"MISSING": "IT", "A": "IT", "B": "IT", "C": "IT"}
+
+    demeaned = sector_demean(raw, sector)
+
+    assert demeaned["MISSING"].available is False
+
+
+def test_sector_demean_large_sector_at_an_extreme():
+    """The actual failure shape from Sep 2026: one sector big enough to get
+    its own mean (IT, 5 names) sits at the absolute bottom of the universe,
+    with every other sector too small to qualify (2 or fewer members each,
+    below MIN_SECTOR_SIZE) sitting entirely above it.
+
+    IT's best name should end up comparable to -- not worse than -- at
+    least one non-IT name after demeaning. Before the universe-mean
+    fallback, small sectors stayed at their raw absolute values while IT
+    alone got recentred near zero, which pushed IT even further below
+    everyone else instead of closer to them.
+    """
+    raw = {
+        "TCS": iv(1.0), "INFY": iv(2.0), "WIPRO": iv(3.0),
+        "HCLTECH": iv(4.0), "TECHM": iv(5.0),          # IT: lowest 5, raw
+        "RELIANCE": iv(10.0), "ONGC": iv(20.0),          # Energy: 2, below floor
+        "ITC": iv(30.0),                                  # FMCG: 1
+        "TITAN": iv(40.0),                                # Consumer: 1
+        "AXISBANK": iv(60.0), "SBIN": iv(70.0),          # Financials: 2
+    }
+    sector = {
+        "TCS": "IT", "INFY": "IT", "WIPRO": "IT", "HCLTECH": "IT", "TECHM": "IT",
+        "RELIANCE": "Energy", "ONGC": "Energy", "ITC": "FMCG", "TITAN": "Consumer",
+        "AXISBANK": "Financials", "SBIN": "Financials",
+    }
+
+    demeaned = sector_demean(raw, sector, min_sector_size=3)
+
+    non_it = ["RELIANCE", "ONGC", "ITC", "TITAN", "AXISBANK", "SBIN"]
+    assert demeaned["TECHM"].value > min(demeaned[s].value for s in non_it), (
+        "IT's strongest name must beat at least the weakest non-IT name "
+        "after demeaning -- otherwise the whole sector is still buried"
+    )
+    # IT's internal order must survive -- demeaning removes the shared
+    # component, not the genuine differences between IT names.
+    assert demeaned["TECHM"].value > demeaned["TCS"].value
+
+
+def test_sector_demean_with_no_sector_map_is_a_passthrough():
+    """No sector data at all (None, or empty) must reproduce the old,
+    plain cross-sectional behaviour exactly -- this is the backward-
+    compatibility guarantee that lets every existing caller keep working."""
+    raw = {"A": iv(1.0), "B": iv(2.0), "C": iv(3.0)}
+
+    assert sector_demean(raw, None) == raw
+    assert sector_demean(raw, {}) == raw

@@ -33,7 +33,12 @@ from algorix.storage import Database
 #: Bumped when the scoring logic changes in a way that makes new scores
 #: incomparable to old ones. Stored per row so a mixed-version history can
 #: still be analysed correctly.
-SCORING_VERSION = 1
+#:
+#: 2 (Sep 2026): A1-A4 are sector-demeaned before ranking (scoring.py
+#: SECTOR_DEMEANED_CONTRIBUTORS) -- a score from v1 and one from v2 answer
+#: different questions ("strong overall" vs "strong for its sector") and
+#: must never be compared as though they were the same number.
+SCORING_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS scan_runs (

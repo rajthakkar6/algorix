@@ -111,7 +111,7 @@ def _load_universe(as_of: date, index_symbol: str):
     symbols = ConstituencyRepository(db).current_constituents(
         index_symbol, on=as_of
     )
-    series, delivery, ids = {}, {}, {}
+    series, delivery, ids, industry = {}, {}, {}, {}
     delivery_start = calendar.trading_days_ago(as_of, DELIVERY_BASELINE * 2)
 
     for symbol in symbols:
@@ -125,7 +125,8 @@ def _load_universe(as_of: date, index_symbol: str):
         delivery[symbol] = delivery_repo.get_range(
             instrument.id, delivery_start, as_of
         )
-    return series, delivery, ids
+        industry[symbol] = instrument.industry
+    return series, delivery, ids, industry
 
 
 def _current_session() -> date:
@@ -139,7 +140,7 @@ def dashboard(request: Request, top: int = 25):
     index_symbol = _index()
     as_of = _current_session()
 
-    series, delivery, _ = _load_universe(as_of, index_symbol)
+    series, delivery, _, industry = _load_universe(as_of, index_symbol)
     if not series:
         return TEMPLATES.TemplateResponse(
             request=request,
@@ -151,6 +152,7 @@ def dashboard(request: Request, top: int = 25):
     universe = score_universe(
         series, momentum, as_of, delivery_by_symbol=delivery,
         calendar=calendar, universe_label=index_symbol,
+        industry_by_symbol=industry,
     )
 
     instrument_repo = InstrumentRepository(db)

@@ -33,7 +33,29 @@ news/sentiment (§3.6), LLM concluder (§3.7).
 **Open finding — the scored universe shows no edge yet.** The first live
 backtest (121 sessions to 2026-09-23) returns a slightly *negative* rank
 IC (-0.03 at 5d, -0.06 at 20d) and a negative top-minus-bottom quintile
-spread. The run's own caveats -- survivorship bias, delivery history
+spread. On the statistically honest non-overlapping-window test (6
+independent 20-session months, since daily-sampled 20d windows reuse 19/20
+of their data and inflate significance), IC was -0.089 (t=-1.49, not
+significant) -- negative in 5 of 6 months, driven largely by A1-A4 (which
+INDICATORS.md §0.1 already flagged as near-redundant "price rose recently"
+restatements) moving as one block whenever a sector moved as one block: a
+July 2026 holdout found every Nifty 50 IT name in the bottom five ranks
+together, then IT rallied 9-27%.
+
+**Fixed (Sep 2026): sector-neutral A1-A4.** NSE's own sector classification
+(already fetched, previously discarded -- see storage schema v5) is now used
+to demean A1-A4 against their sector's average before ranking (INDICATORS.md
+A1-A4 section). Re-run on the same July holdout: quintile spread went from
+-7.85% to +1.13%. Re-run across all six non-overlapping windows: IC went
+from -0.089 to +0.005 -- essentially zero rather than negative, and still
+not a statistically significant *positive* signal at n=6. This resolves the
+observed structural failure (a whole sector being indistinguishable from a
+weak individual stock); it does not by itself establish predictive validity,
+which still needs more independent observations than six months provides.
+Scores from before and after are labelled differently and never compared
+(`SCORING_VERSION` 1→2, `StockScore.method`).
+
+The run's own caveats -- survivorship bias, delivery history
 starting 2026-08-11, retroactively adjusted prices -- mean this is not yet
 conclusive either way, but it is the thing to resolve before the scores are
 trusted or the weights are tuned further.

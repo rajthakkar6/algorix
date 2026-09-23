@@ -101,6 +101,7 @@ def run_scan(
     )
     series_by_symbol = {}
     delivery_by_symbol = {}
+    industry_by_symbol = {}
 
     for symbol in symbols:
         instrument = instrument_repo.get(symbol, Exchange.NSE)
@@ -113,6 +114,7 @@ def run_scan(
         delivery_by_symbol[symbol] = delivery_repo.get_range(
             instrument.id, delivery_start, as_of
         )
+        industry_by_symbol[symbol] = instrument.industry
 
     if not series_by_symbol:
         errors.append(
@@ -136,6 +138,7 @@ def run_scan(
         delivery_by_symbol=delivery_by_symbol,
         calendar=calendar,
         universe_label=index_symbol,
+        industry_by_symbol=industry_by_symbol,
     )
 
     # -- regime ------------------------------------------------------------

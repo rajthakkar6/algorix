@@ -119,6 +119,81 @@ def rank_percentile(values: Mapping[str, IndicatorValue]) -> Ranking:
     return Ranking(ranked=ranked, excluded=excluded)
 
 
+#: A sector average computed from fewer members than this is treated as
+#: noise, not a baseline. Demeaning against it would just subtract the
+#: stock's own value back out and flatten it to a constant -- worse than
+#: leaving it unadjusted. Several Nifty 50 sectors (Capital Goods,
+#: Construction, Telecommunication) currently have exactly one member.
+MIN_SECTOR_SIZE = 3
+
+
+def sector_demean(
+    values: Mapping[str, IndicatorValue],
+    sector_by_symbol: Mapping[str, str | None] | None,
+    min_sector_size: int = MIN_SECTOR_SIZE,
+) -> dict[str, IndicatorValue]:
+    """Subtract a baseline from every value, before ranking.
+
+    A cross-sectional percentile answers "is this stock strong against the
+    whole universe" -- and when a sector moves as a block (Sep 2026: every
+    IT name in the Nifty 50 took the bottom five ranks together, then IT
+    rallied), that question is really "did this stock happen to be in the
+    sector everyone else avoided", not "is this specific name strong or
+    weak." Subtracting the sector's own average first changes the question
+    to "is this stock strong for its sector" -- the ranking still runs
+    against the full universe afterwards (unchanged cohort size, so
+    `MIN_COHORT` is unaffected), only what is being ranked changes.
+
+    **Every value gets a baseline subtracted, on the same scale, or this
+    makes things worse, not better.** A stock whose sector has fewer than
+    `min_sector_size` members (or no recorded sector) falls back to the
+    *universe* mean rather than passing through raw. Nifty 50's own shape
+    is why this matters: IT has enough members to get its own baseline, but
+    Telecommunication, Construction and Capital Goods each have exactly
+    one, and Energy and Financials often have only two or three. An earlier
+    version of this function left small-sector and unclassified stocks at
+    their raw, absolute value while large-sector stocks were recentred near
+    zero -- and when the large sector sat at one extreme with nothing below
+    it (IT's actual Sep 2026 shape), that recentring pushed it *further*
+    below the untouched stocks instead of closer to them. Falling back to
+    the universe mean keeps every stock's post-subtraction value on a
+    comparable footing: a constant subtracted from everyone changes nothing
+    about relative order, so small-sector and unclassified stocks rank
+    among themselves exactly as they did raw, while genuinely sitting on
+    the same scale as sector-demeaned peers instead of a different one.
+    """
+    sector_by_symbol = sector_by_symbol or {}
+    if not sector_by_symbol:
+        return dict(values)
+
+    available = {s: v.value for s, v in values.items() if v.available}
+    if not available:
+        return dict(values)
+
+    grand_mean = sum(available.values()) / len(available)
+
+    by_sector: dict[str, list[float]] = {}
+    for symbol, raw in available.items():
+        sector = sector_by_symbol.get(symbol)
+        if sector is not None:
+            by_sector.setdefault(sector, []).append(raw)
+
+    sector_mean = {
+        sector: sum(vals) / len(vals)
+        for sector, vals in by_sector.items()
+        if len(vals) >= min_sector_size
+    }
+
+    demeaned: dict[str, IndicatorValue] = {}
+    for symbol, value in values.items():
+        if not value.available:
+            demeaned[symbol] = value
+            continue
+        baseline = sector_mean.get(sector_by_symbol.get(symbol), grand_mean)
+        demeaned[symbol] = IndicatorValue.of(value.value - baseline)
+    return demeaned
+
+
 @dataclass(frozen=True)
 class MomentumProfile:
     """Multi-window momentum for one instrument (INDICATORS.md A1)."""
