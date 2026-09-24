@@ -8,7 +8,7 @@ with a message that says which instrument and which session went wrong.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from enum import StrEnum
 
 from algorix.exceptions import DataIntegrityError
@@ -168,3 +168,42 @@ class DeliveryRecord:
         if self.traded_quantity == 0:
             return None
         return (self.delivered_quantity / self.traded_quantity) * 100.0
+
+
+@dataclass(frozen=True)
+class AnnouncementRecord:
+    """One NSE corporate announcement (INDICATORS.md G1).
+
+    The highest-quality news source available to this tool -- official,
+    structured, timestamped, free, and impossible to astroturf. This is raw
+    structured data only: G0 forbids using it as a directional score input,
+    and no sentiment/materiality judgement is made here. That is a later,
+    separate concern (G4) with real per-item LLM cost.
+
+    `seq_id` is NSE's own identifier for the announcement and is globally
+    unique, so it is the natural idempotency key for storage -- the same
+    announcement fetched twice (an inevitable consequence of overlapping
+    date-range refetches) upserts rather than duplicates.
+    """
+
+    seq_id: str
+    symbol: str
+    announced_at: datetime
+    category: str
+    text: str
+    attachment_url: str | None = None
+    isin: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.seq_id or not self.seq_id.strip():
+            raise DataIntegrityError("announcement seq_id cannot be empty")
+        if not self.symbol or not self.symbol.strip():
+            raise DataIntegrityError(
+                f"announcement {self.seq_id}: symbol cannot be empty"
+            )
+        if not self.text or not self.text.strip():
+            # An announcement with no text is not a smaller announcement --
+            # it is a parse failure. NSE's own feed always carries this.
+            raise DataIntegrityError(
+                f"announcement {self.seq_id}: text cannot be empty"
+            )

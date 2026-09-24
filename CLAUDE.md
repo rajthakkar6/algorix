@@ -18,9 +18,17 @@ Telegram delivery needs `ALGORIX_TELEGRAM_TOKEN` and
 runs, journals, and reports delivery as unconfigured.
 
 Module map: `calendar` → `storage` → `universe`/`ingestion`/`delivery`/
-`metals` → `refresh` (data layer); `series` → `indicators`/`cross_sectional`/
-`regime` → `scoring` → `journal`/`notify` → `scan` (analysis layer);
-`backtest` and `web` both sit on top and read the same store.
+`metals`/`announcements` → `refresh` (data layer); `series` → `indicators`/
+`cross_sectional`/`regime` → `scoring` → `journal`/`notify` → `scan`
+(analysis layer); `backtest` and `web` both sit on top and read the same
+store.
+
+`announcements` (INDICATORS.md G1) is data plumbing only -- structured NSE
+corporate filings, fetched and stored, never scored. It is deliberately not
+yet wired into `refresh` or `scan` (INDICATORS.md G4, LLM-based structured
+extraction, is a separate future task with real per-item LLM cost that has
+not been sized). Sentiment/news must never become a directional score
+input -- see invariant 2.
 
 `refresh` is the only module that ingests bars. Anything the analysis layer
 reads a price series for -- index, VIX, metals -- must be registered there,

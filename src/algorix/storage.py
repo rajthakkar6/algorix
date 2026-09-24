@@ -29,6 +29,7 @@ from pathlib import Path
 
 from algorix.exceptions import StorageError
 from algorix.models import (
+    AnnouncementRecord,
     Bar,
     CalendarPolicy,
     DeliveryRecord,
@@ -143,6 +144,28 @@ ALTER TABLE instruments
     ADD COLUMN industry TEXT;
 """
 
+# NSE's corporate announcements endpoint hands out its own globally unique
+# id per announcement (`seq_id`) -- unlike every other table here, that is
+# the natural primary key on its own, not a composite of instrument and
+# date. The same announcement re-fetched on an overlapping date-range pull
+# upserts onto itself instead of duplicating.
+_SCHEMA_V6 = """
+CREATE TABLE IF NOT EXISTS corporate_announcements (
+    seq_id             TEXT    PRIMARY KEY,
+    instrument_id      INTEGER NOT NULL REFERENCES instruments(id) ON DELETE CASCADE,
+    announced_at       TEXT    NOT NULL,
+    category           TEXT    NOT NULL,
+    announcement_text  TEXT    NOT NULL,
+    attachment_url     TEXT,
+    isin               TEXT,
+    source             TEXT    NOT NULL,
+    ingested_at        TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_announcements_instrument
+    ON corporate_announcements (instrument_id, announced_at);
+"""
+
 #: Ordered migrations. Each runs once, in version order, against databases
 #: older than it. Never edit a migration that has shipped -- add a new one.
 _MIGRATIONS: list[tuple[int, str]] = [
@@ -151,6 +174,7 @@ _MIGRATIONS: list[tuple[int, str]] = [
     (3, _SCHEMA_V3),
     (4, _SCHEMA_V4),
     (5, _SCHEMA_V5),
+    (6, _SCHEMA_V6),
 ]
 
 SCHEMA_VERSION = _MIGRATIONS[-1][0]
@@ -521,6 +545,119 @@ class DeliveryRepository:
                 session_date=date.fromisoformat(r["session_date"]),
                 traded_quantity=r["traded_quantity"],
                 delivered_quantity=r["delivered_quantity"],
+            )
+            for r in rows
+        ]
+
+
+class AnnouncementRepository:
+    """Read/write access to NSE corporate announcements (INDICATORS.md G1)."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    def upsert_many(
+        self,
+        pairs: Iterable[tuple[AnnouncementRecord, int]],
+        source: str,
+    ) -> int:
+        """Store announcements paired with their already-resolved instrument id.
+
+        Takes (record, instrument_id) pairs rather than one instrument_id
+        for the whole batch: unlike delivery (one bhavcopy file = one
+        session, symbol-keyed within it), announcements are typically
+        fetched per-symbol already, but nothing here should assume that --
+        a market-wide pull naturally mixes symbols in one response.
+
+        Keyed on `seq_id` (NSE's own id), so the same announcement seen
+        again on an overlapping refetch updates in place rather than
+        duplicating.
+        """
+        rows = [
+            (
+                rec.seq_id,
+                instrument_id,
+                rec.announced_at.isoformat(),
+                rec.category,
+                rec.text,
+                rec.attachment_url,
+                rec.isin,
+                source,
+                _utc_now_iso(),
+            )
+            for rec, instrument_id in pairs
+        ]
+        if not rows:
+            return 0
+
+        with self.db.connect() as conn:
+            try:
+                conn.executemany(
+                    """
+                    INSERT INTO corporate_announcements
+                        (seq_id, instrument_id, announced_at, category,
+                         announcement_text, attachment_url, isin, source,
+                         ingested_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (seq_id) DO UPDATE SET
+                        instrument_id     = excluded.instrument_id,
+                        announced_at      = excluded.announced_at,
+                        category          = excluded.category,
+                        announcement_text = excluded.announcement_text,
+                        attachment_url    = excluded.attachment_url,
+                        isin              = excluded.isin,
+                        source            = excluded.source,
+                        ingested_at       = excluded.ingested_at
+                    """,
+                    rows,
+                )
+            except sqlite3.IntegrityError as exc:
+                raise StorageError(
+                    f"Rejected announcement data: {exc}"
+                ) from exc
+        return len(rows)
+
+    def get_range(
+        self, instrument_id: int, start: date, end: date
+    ) -> list[AnnouncementRecord]:
+        """Announcements for one instrument, newest first.
+
+        `start`/`end` bound the announcement *date* (not just session date
+        -- announcements carry a time of day and can land after market
+        close), so both ends are inclusive calendar days.
+        """
+        if start > end:
+            raise ValueError(f"start {start} is after end {end}")
+
+        with self.db.connect() as conn:
+            symbol_row = conn.execute(
+                "SELECT symbol FROM instruments WHERE id = ?", (instrument_id,)
+            ).fetchone()
+            if symbol_row is None:
+                return []
+            symbol = symbol_row["symbol"]
+
+            rows = conn.execute(
+                """
+                SELECT seq_id, announced_at, category, announcement_text,
+                       attachment_url, isin
+                FROM corporate_announcements
+                WHERE instrument_id = ?
+                  AND date(announced_at) BETWEEN ? AND ?
+                ORDER BY announced_at DESC
+                """,
+                (instrument_id, start.isoformat(), end.isoformat()),
+            ).fetchall()
+
+        return [
+            AnnouncementRecord(
+                seq_id=r["seq_id"],
+                symbol=symbol,
+                announced_at=datetime.fromisoformat(r["announced_at"]),
+                category=r["category"],
+                text=r["announcement_text"],
+                attachment_url=r["attachment_url"],
+                isin=r["isin"],
             )
             for r in rows
         ]

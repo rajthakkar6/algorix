@@ -26,9 +26,24 @@ full 31-session delivery window, and all four regime gates reporting.
 | Cron scheduling | ✅ (opt-in install) |
 | Local web UI — dashboard, stock detail, backtest, journal | ✅ |
 | Backtest / signal evaluation (IC, quintile spread) | ✅ |
+| News/sentiment — G1 NSE corporate announcements (fetch, parse, store) | ✅ (data plumbing only, not wired into refresh/scan) |
 
 Not yet built: watchlist background jobs (§3.4), real-time lookup (§3.5),
-news/sentiment (§3.6), LLM concluder (§3.7).
+G4 sentiment extraction and G2/G3 sources (§3.6), LLM concluder (§3.7).
+
+**§3.6 in progress (Sep 2026).** G1 (NSE/BSE corporate announcements) is
+built: `announcements.py` fetches, parses and stores structured filings per
+instrument, keyed on NSE's own `seq_id` for idempotent upserts. No
+truncation defect was found on this endpoint after testing 30–365 day
+lookback windows (a false positive from an earlier test script, corrected
+before shipping — see the module docstring). This is raw structured data
+only — no sentiment, no event classification, and nothing here is scored;
+G0 forbids sentiment as a directional score input. G4 (LLM-based structured
+extraction into event type/polarity/materiality) is the natural next step
+but has real, recurring per-item LLM cost that has not yet been sized —
+flagged for discussion before building, per the cost-flagging rule in
+CLAUDE.md. G2 (mainstream news RSS) and G3 (social, already [OPEN] on cost
+grounds) are unbuilt.
 
 **Open finding — the scored universe shows no edge yet.** The first live
 backtest (121 sessions to 2026-09-23) returns a slightly *negative* rank
