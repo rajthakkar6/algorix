@@ -347,6 +347,11 @@ class CollectionReport:
     #: a non-"succeeded" batch outcome, or a response that failed schema
     #: validation. Collected, never silently dropped.
     failed: list[tuple[str, str]] = field(default_factory=list)
+    #: Set only when `ready` is False for a reason other than "still
+    #: processing" -- e.g. credentials went missing between submission and
+    #: collection. None for the ordinary still-processing case, which is
+    #: not exceptional and needs no explanation.
+    reason: str | None = None
 
 
 def collect_extraction_results(
@@ -363,7 +368,14 @@ def collect_extraction_results(
     now = now or datetime.now(timezone.utc)
     extractor = extractor or AnthropicExtractor()
 
-    status = extractor.batch_status(batch_id)
+    try:
+        status = extractor.batch_status(batch_id)
+    except NotConfiguredError as exc:
+        # Mirrors submit_extraction_batch's handling of the same error --
+        # a batch submitted while configured must not crash collection just
+        # because credentials are absent by the time this runs.
+        return CollectionReport(batch_id=batch_id, ready=False, reason=str(exc))
+
     if status != "ended":
         return CollectionReport(batch_id=batch_id, ready=False)
 

@@ -386,3 +386,22 @@ def test_repository_upsert_many_with_empty_iterable_is_a_noop(db):
     stored = AnnouncementRepository(db).upsert_many([], source="test")
 
     assert stored == 0
+
+
+def test_latest_announced_at_returns_the_most_recent_timestamp(db, reliance_id):
+    repo = AnnouncementRepository(db)
+    older = AnnouncementRecord(
+        seq_id="1", symbol="RELIANCE", announced_at=datetime(2026, 9, 10, 9, 0),
+        category="Updates", text="older",
+    )
+    newer = AnnouncementRecord(
+        seq_id="2", symbol="RELIANCE", announced_at=datetime(2026, 9, 20, 15, 30),
+        category="Updates", text="newer",
+    )
+    repo.upsert_many([(older, reliance_id), (newer, reliance_id)], source="test")
+
+    assert repo.latest_announced_at(reliance_id) == datetime(2026, 9, 20, 15, 30)
+
+
+def test_latest_announced_at_with_no_history_is_none(db, reliance_id):
+    assert AnnouncementRepository(db).latest_announced_at(reliance_id) is None

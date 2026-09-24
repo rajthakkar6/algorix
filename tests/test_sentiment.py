@@ -122,6 +122,8 @@ class FakeExtractor:
         return batch_id
 
     def batch_status(self, batch_id):
+        if self.not_configured:
+            raise NotConfiguredError("ANTHROPIC_API_KEY is not set.")
         return self.status_by_batch.get(batch_id, "ended")
 
     def batch_results(self, batch_id):
@@ -328,6 +330,20 @@ def test_collect_when_batch_still_processing_stores_nothing(db, reliance_id):
 
     assert report.ready is False
     assert report.stored == 0
+    assert EventExtractionRepository(db).get("1") is None
+
+
+def test_collect_when_not_configured_reports_not_raises(db, reliance_id):
+    """A batch submitted while configured must not crash collection if
+    credentials are absent by the time collection runs -- mirrors
+    submit_extraction_batch's handling of the same error exactly."""
+    seed_announcements(db, reliance_id, ["1"])
+    extractor = FakeExtractor(not_configured=True)
+
+    report = collect_extraction_results(db, "batch_1", now=NOW, extractor=extractor)
+
+    assert report.ready is False
+    assert "ANTHROPIC_API_KEY" in report.reason
     assert EventExtractionRepository(db).get("1") is None
 
 

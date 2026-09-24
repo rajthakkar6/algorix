@@ -122,6 +122,25 @@ class FakeBhavcopyClient:
         )
 
 
+class FakeAnnouncementsClient:
+    """Mirrors FakeBhavcopyClient's shape for the G1 announcements client."""
+
+    def __init__(self, records_by_symbol=None, error=None):
+        self.records_by_symbol = records_by_symbol or {}
+        self.error = error
+        self.requested: list[tuple[str, date, date]] = []
+
+    def fetch(self, symbol, start, end):
+        self.requested.append((symbol, start, end))
+        if self.error:
+            raise self.error
+        from algorix.announcements import AnnouncementFetchResult
+
+        return AnnouncementFetchResult(
+            records=self.records_by_symbol.get(symbol, [])
+        )
+
+
 def run(db, cal, **kwargs):
     defaults = dict(
         now=NOW,
@@ -129,6 +148,12 @@ def run(db, cal, **kwargs):
         bar_source=FakeBarSource(),
         index_client=FakeIndexClient(),
         bhavcopy_client=FakeBhavcopyClient(),
+        announcements_client=FakeAnnouncementsClient(),
+        # Sentiment needs ANTHROPIC_API_KEY and costs real (small) money --
+        # the pre-existing 34 tests below are about bars/delivery/universe
+        # orchestration, not G4, so they stay off it by default. Dedicated
+        # tests further down turn it on explicitly with a fake extractor.
+        skip_sentiment=True,
     )
     defaults.update(kwargs)
     return refresh(db, **defaults)
@@ -559,3 +584,238 @@ def test_regime_instrument_failure_is_collected_not_fatal(db, cal):
     # And the failure is visible rather than swallowed.
     assert any("INDIAVIX" in e for e in report.errors)
     assert not report.is_clean
+
+
+# --------------------------------------------------------------------------
+# Announcements (G1) wired into refresh
+# --------------------------------------------------------------------------
+
+
+def test_refresh_ingests_announcements_for_equities(db, cal):
+    from algorix.models import AnnouncementRecord
+
+    client = FakeAnnouncementsClient(
+        records_by_symbol={
+            "RELIANCE": [
+                AnnouncementRecord(
+                    seq_id="1", symbol="RELIANCE",
+                    announced_at=datetime(2026, 9, 17, 10, 0),
+                    category="Updates", text="a real disclosure",
+                )
+            ],
+        }
+    )
+
+    report = run(db, cal, announcements_client=client)
+
+    assert report.announcements_stored == 1
+    symbols_fetched = {s for s, _, _ in client.requested}
+    # Fetched for equities, never for the index or India VIX -- they do
+    # not issue corporate announcements.
+    assert "RELIANCE" in symbols_fetched
+    assert "NIFTY50" not in symbols_fetched
+    assert "INDIAVIX" not in symbols_fetched
+
+
+def test_refresh_announcement_failure_is_collected_not_fatal(db, cal):
+    client = FakeAnnouncementsClient(error=SourceUnreachableError("NSE unreachable"))
+
+    report = run(db, cal, announcements_client=client)
+
+    assert report.announcement_reports == []
+    assert any("announcements" in e for e in report.errors)
+    # Bars still landed -- one broken feed does not abandon the run.
+    assert report.bars_stored > 0
+
+
+def test_skip_announcements_fetches_nothing(db, cal):
+    client = FakeAnnouncementsClient()
+
+    report = run(db, cal, skip_announcements=True, announcements_client=client)
+
+    assert report.announcement_reports == []
+    assert client.requested == []
+
+
+def test_announcement_incremental_window_uses_latest_stored(db, cal):
+    """A second run should not re-request the full history window -- it
+    should start from near the last stored announcement, mirroring how bar
+    refreshes only re-fetch a short overlap."""
+    from algorix.models import AnnouncementRecord
+    from algorix.storage import AnnouncementRepository, InstrumentRepository
+
+    first_client = FakeAnnouncementsClient()
+    run(db, cal, announcements_client=first_client)
+
+    repo = InstrumentRepository(db)
+    reliance = repo.get("RELIANCE", Exchange.NSE)
+    AnnouncementRepository(db).upsert_many(
+        [
+            (
+                AnnouncementRecord(
+                    seq_id="1", symbol="RELIANCE",
+                    announced_at=datetime(2026, 9, 16, 9, 0),
+                    category="Updates", text="already stored",
+                ),
+                reliance.id,
+            )
+        ],
+        source="test",
+    )
+
+    second_client = FakeAnnouncementsClient()
+    run(db, cal, announcements_client=second_client, now=datetime(2026, 9, 19, 8, 0, tzinfo=IST))
+
+    reliance_requests = [r for r in second_client.requested if r[0] == "RELIANCE"]
+    assert len(reliance_requests) == 1
+    _, start, _ = reliance_requests[0]
+    # Should start near 2026-09-16 (the stored announcement, minus overlap),
+    # not the full 30-day history window.
+    assert start > date(2026, 9, 1)
+
+
+# --------------------------------------------------------------------------
+# Sentiment (G4) wired into refresh
+# --------------------------------------------------------------------------
+
+
+class FakeSentimentExtractor:
+    """Minimal stand-in for sentiment.AnthropicExtractor at the refresh
+    orchestration level -- mirrors test_sentiment.py's FakeExtractor."""
+
+    def __init__(self, not_configured=False):
+        self.not_configured = not_configured
+        self.model_id = "claude-sonnet-5"
+        self.submitted = []
+        self.results_by_batch = {}
+        self.status_by_batch = {}
+        self._next_id = 1
+
+    def submit_batch(self, items):
+        from algorix.sentiment import NotConfiguredError
+
+        if self.not_configured:
+            raise NotConfiguredError("ANTHROPIC_API_KEY is not set.")
+        batch_id = f"batch_{self._next_id}"
+        self._next_id += 1
+        self.submitted.append(items)
+        return batch_id
+
+    def batch_status(self, batch_id):
+        return self.status_by_batch.get(batch_id, "ended")
+
+    def batch_results(self, batch_id):
+        return self.results_by_batch.get(batch_id, [])
+
+
+def test_refresh_with_sentiment_enabled_submits_a_batch(db, cal):
+    """New announcements land, then get submitted for extraction in the
+    same run -- collect-then-submit within one refresh call."""
+    from algorix.models import AnnouncementRecord
+
+    ann_client = FakeAnnouncementsClient(
+        records_by_symbol={
+            "RELIANCE": [
+                AnnouncementRecord(
+                    seq_id="1", symbol="RELIANCE",
+                    announced_at=datetime(2026, 9, 17, 10, 0),
+                    category="Updates", text="a real disclosure",
+                )
+            ],
+        }
+    )
+    extractor = FakeSentimentExtractor()
+
+    report = run(
+        db, cal, skip_sentiment=False,
+        announcements_client=ann_client, extractor=extractor,
+    )
+
+    assert report.sentiment_submission is not None
+    assert report.sentiment_submission.submitted is True
+    assert report.sentiment_submission.item_count == 1
+
+
+def test_refresh_collects_a_ready_pending_batch(db, cal):
+    from algorix.models import AnnouncementRecord
+    from algorix.sentiment import BatchItemResult
+    from algorix.storage import ExtractionBatch, ExtractionBatchRepository
+
+    # The extracted event's FK requires the source announcement to actually
+    # exist -- a batch is always submitted from real, already-ingested rows.
+    ann_client = FakeAnnouncementsClient(
+        records_by_symbol={
+            "RELIANCE": [
+                AnnouncementRecord(
+                    seq_id="1", symbol="RELIANCE",
+                    announced_at=datetime(2026, 9, 17, 10, 0),
+                    category="Updates", text="a real disclosure",
+                )
+            ],
+        }
+    )
+    run(db, cal, announcements_client=ann_client)
+
+    ExtractionBatchRepository(db).record_submission(
+        ExtractionBatch(
+            batch_id="batch_1", submitted_at=NOW, item_count=1,
+            model_id="claude-sonnet-5", prompt_version=1, status="submitted",
+        )
+    )
+    extractor = FakeSentimentExtractor()
+    extractor.results_by_batch["batch_1"] = [
+        BatchItemResult(
+            custom_id="1", outcome="succeeded",
+            text='{"event_type": "business_update", "entities": [], '
+                 '"polarity": "neutral", "materiality": "low", '
+                 '"risk_flag": false, "risk_reason": null}',
+        )
+    ]
+
+    report = run(db, cal, skip_sentiment=False, extractor=extractor)
+
+    assert report.events_extracted == 1
+    assert len(report.sentiment_collected) == 1
+
+
+def test_refresh_sentiment_not_configured_degrades_cleanly(db, cal):
+    """No API key must not fail the refresh -- bars/delivery/announcements
+    still complete, exactly like an unconfigured Telegram digest."""
+    from algorix.models import AnnouncementRecord
+
+    # Needs a real unextracted announcement, or submission short-circuits
+    # on "nothing to do" before ever reaching the extractor.
+    ann_client = FakeAnnouncementsClient(
+        records_by_symbol={
+            "RELIANCE": [
+                AnnouncementRecord(
+                    seq_id="1", symbol="RELIANCE",
+                    announced_at=datetime(2026, 9, 17, 10, 0),
+                    category="Updates", text="a real disclosure",
+                )
+            ],
+        }
+    )
+    extractor = FakeSentimentExtractor(not_configured=True)
+
+    report = run(
+        db, cal, skip_sentiment=False,
+        announcements_client=ann_client, extractor=extractor,
+    )
+
+    assert report.sentiment_submission is not None
+    assert report.sentiment_submission.submitted is False
+    assert "ANTHROPIC_API_KEY" in report.sentiment_submission.reason
+    assert report.bars_stored > 0
+    # Not configured is not an error -- it must not add to `errors`, the
+    # same way an unconfigured Telegram digest never does.
+    assert report.errors == []
+
+
+def test_skip_sentiment_never_touches_the_extractor(db, cal):
+    extractor = FakeSentimentExtractor()
+
+    report = run(db, cal, skip_sentiment=True, extractor=extractor)
+
+    assert report.sentiment_submission is None
+    assert extractor.submitted == []

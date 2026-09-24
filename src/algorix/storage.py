@@ -603,6 +603,20 @@ class AnnouncementRepository:
     def __init__(self, db: Database) -> None:
         self.db = db
 
+    def latest_announced_at(self, instrument_id: int) -> datetime | None:
+        """Most recent stored announcement's timestamp, or None if there is
+        no history yet. Mirrors BarRepository.latest_session -- the same
+        incremental-refresh watermark, one layer over."""
+        with self.db.connect() as conn:
+            row = conn.execute(
+                "SELECT MAX(announced_at) AS latest FROM corporate_announcements "
+                "WHERE instrument_id = ?",
+                (instrument_id,),
+            ).fetchone()
+        if not row or row["latest"] is None:
+            return None
+        return datetime.fromisoformat(row["latest"])
+
     def upsert_many(
         self,
         pairs: Iterable[tuple[AnnouncementRecord, int]],

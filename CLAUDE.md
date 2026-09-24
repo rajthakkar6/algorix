@@ -17,31 +17,32 @@ Telegram delivery needs `ALGORIX_TELEGRAM_TOKEN` and
 `ALGORIX_TELEGRAM_CHAT_ID` in the environment. Without them the scan still
 runs, journals, and reports delivery as unconfigured.
 
-G4 sentiment extraction (`sentiment.submit_extraction_batch` /
-`collect_extraction_results`) needs `ANTHROPIC_API_KEY` (the SDK's own
-standard env var, not an `ALGORIX_`-prefixed one) in the environment.
-Without it, submission returns a report saying so rather than raising --
-same shape as the Telegram case above. No CLI entry point yet; called from
-Python until the submit/collect scheduling cadence is decided.
+`refresh` now also ingests corporate announcements (G1) and drives G4
+sentiment extraction every run: it collects any batch submitted by an
+earlier run that has finished, then submits whatever is newly unextracted.
+G4 needs `ANTHROPIC_API_KEY` (the SDK's own standard env var, not an
+`ALGORIX_`-prefixed one) in the environment -- without it, `refresh` still
+completes normally and reports the sentiment step as unconfigured, same
+shape as an unconfigured Telegram digest. `--skip-announcements` and
+`--skip-sentiment` disable each independently.
 
 Module map: `calendar` → `storage` → `universe`/`ingestion`/`delivery`/
 `metals`/`announcements` → `refresh` (data layer); `series` → `indicators`/
 `cross_sectional`/`regime` → `scoring` → `journal`/`notify` → `scan`
 (analysis layer); `backtest` and `web` both sit on top and read the same
-store. `sentiment` sits beside `scoring`, not inside it.
+store. `sentiment` sits beside `scoring`, not inside it, and is driven by
+`refresh`, not by `scan` -- the daily scan needs a score right now; G4's
+Batch API can take up to 24h, so it runs on its own submit-then-collect
+cadence across successive `refresh` calls instead.
 
 `announcements` (INDICATORS.md G1) is data plumbing only -- structured NSE
 corporate filings, fetched and stored, never scored. `sentiment`
 (INDICATORS.md G4) turns those into a structured judgement (event type,
 polarity, materiality, risk flag) via the Anthropic Batch API -- sized at
 ~$1/month at observed Nifty 50 volume before it was built (see the module
-docstring), needs `ANTHROPIC_API_KEY` and degrades to an unconfigured
-report without it, mirroring `notify`'s Telegram pattern. Asynchronous
-(results can take up to 24h), so submission and collection are separate
-functions -- neither is wired into `refresh`/`scan` yet; that scheduling
-decision is a separate task. **Nothing in `sentiment.py` is imported by
-`scoring.py`, and nothing should be** -- sentiment/news must never become a
-directional score input, see invariant 2.
+docstring). **Nothing in `sentiment.py` is imported by `scoring.py`, and
+nothing should be** -- sentiment/news must never become a directional score
+input, see invariant 2.
 
 `refresh` is the only module that ingests bars. Anything the analysis layer
 reads a price series for -- index, VIX, metals -- must be registered there,

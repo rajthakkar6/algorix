@@ -26,7 +26,7 @@ full 31-session delivery window, and all four regime gates reporting.
 | Cron scheduling | ✅ (opt-in install) |
 | Local web UI — dashboard, stock detail, backtest, journal | ✅ |
 | Backtest / signal evaluation (IC, quintile spread) | ✅ |
-| News/sentiment — G1 NSE announcements + G4 LLM extraction | ✅ (needs `ANTHROPIC_API_KEY`; not wired into refresh/scan) |
+| News/sentiment — G1 NSE announcements + G4 LLM extraction | ✅ (wired into `refresh`; needs `ANTHROPIC_API_KEY` for G4) |
 
 Not yet built: watchlist background jobs (§3.4), real-time lookup (§3.5),
 G2/G3 sources (§3.6), LLM concluder (§3.7).
@@ -48,15 +48,24 @@ generously assuming an earnings-season spike. Two-phase (`submit_*`/
 `collect_*`) because the Batch API is asynchronous — up to 24h — so this is
 not one synchronous call like the rest of the data layer. Degrades to a
 clear "not configured" report without `ANTHROPIC_API_KEY`, mirroring
-`notify.py`'s Telegram pattern exactly; verified live against the real
-project database in that state (21 real unextracted announcements, correct
-graceful report, nothing crashed). Nothing here is scored — G0 forbids
-sentiment as a directional score input, and `scoring.py` does not import
-`sentiment.py`. Not yet wired into `refresh`/`scan`: a daily job cannot
-synchronously await a job that can take a day, so the submit/collect
-cadence is its own scheduling decision, left for a follow-up task. G2
-(mainstream news RSS) and G3 (social, already [OPEN] on cost grounds) are
-unbuilt.
+`notify.py`'s Telegram pattern exactly. Nothing here is scored — G0
+forbids sentiment as a directional score input, and `scoring.py` does not
+import `sentiment.py`.
+
+**Both are now wired into `refresh`** (Sep 2026): every run ingests new
+announcements for the tracked universe, collects any earlier G4 batch that
+has finished, then submits whatever is newly unextracted — capped, and
+independently skippable via `--skip-announcements`/`--skip-sentiment`.
+Live-verified against the real project database: 463 real announcements
+landed across 49 of 50 Nifty 50 names on the first run, a second run
+re-fetched the incremental overlap window without creating a single
+duplicate row, and with no `ANTHROPIC_API_KEY` configured the sentiment
+step reported itself unconfigured on every run while the rest of the
+refresh (bars, delivery, announcements) completed normally — no live G4
+extraction has actually run yet, since this environment has no Anthropic
+credentials; that will be the first true end-to-end proof of the G4 half.
+G2 (mainstream news RSS) and G3 (social, already [OPEN] on cost grounds)
+are unbuilt.
 
 **Open finding — the scored universe shows no edge yet.** The first live
 backtest (121 sessions to 2026-09-23) returns a slightly *negative* rank
