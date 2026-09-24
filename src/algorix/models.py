@@ -207,3 +207,94 @@ class AnnouncementRecord:
             raise DataIntegrityError(
                 f"announcement {self.seq_id}: text cannot be empty"
             )
+
+
+class EventType(StrEnum):
+    """Consolidated event categories for G4 extraction.
+
+    NSE's own `desc` field on an announcement (AnnouncementRecord.category)
+    is already a category, but a fine-grained and inconsistent one -- a
+    30-day live sample across 15 Nifty 50 names turned up ~28 distinct
+    values ("Updates", "General Updates" and "Analysts/Institutional
+    Investor Meet/Con. Call Updates" all separately, for instance). This
+    enum is what the extraction consolidates *into*: a small, closed,
+    consistent set an LLM can classify reliably and a digest can group by.
+    Grounded in that same sample, not invented.
+    """
+
+    EARNINGS_OR_RESULTS = "earnings_or_results"
+    CORPORATE_ACTION = "corporate_action"
+    MANAGEMENT_CHANGE = "management_change"
+    REGULATORY_OR_LEGAL = "regulatory_or_legal"
+    MERGER_ACQUISITION = "merger_acquisition"
+    BUSINESS_UPDATE = "business_update"
+    CREDIT_RATING = "credit_rating"
+    SHAREHOLDER_MEETING = "shareholder_meeting"
+    ADMINISTRATIVE = "administrative"
+    OTHER = "other"
+
+
+class Polarity(StrEnum):
+    POSITIVE = "positive"
+    NEGATIVE = "negative"
+    NEUTRAL = "neutral"
+
+
+class Materiality(StrEnum):
+    """How significant this event is to the business -- not how the market
+    might react to it. A calm-toned but structurally important disclosure
+    (auditor resignation) can be HIGH; an emphatic press release about a
+    routine matter can be LOW. Three levels, not five: nothing here has
+    been calibrated against outcomes yet, so more granularity would be
+    false precision (see the equal-weighting rationale in scoring.py)."""
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+@dataclass(frozen=True)
+class ExtractedEvent:
+    """One announcement's structured judgement (INDICATORS.md G4).
+
+    **Never a score input** -- G0 is explicit that sentiment/news must never
+    become a directional score contributor. This exists for event
+    detection, risk flags, and contrarian-extreme context only (G0's three
+    approved uses), surfaced in the digest/journal as a separate, clearly
+    labelled layer alongside the quant score, never blended into it
+    (mirrors CLAUDE.md invariant 1's rule for the LLM concluder -- the same
+    separation applies here, one step earlier in the pipeline).
+
+    One extraction per announcement (`announcement_seq_id` is the source
+    row's own primary key), so storage can upsert on it the same way.
+    `model_id` and `prompt_version` are recorded with every row -- CLAUDE.md
+    invariant 7: without them, months of extracted events are uninterpretable
+    because nothing says what changed underneath them.
+    """
+
+    announcement_seq_id: str
+    event_type: EventType
+    entities: list[str]
+    polarity: Polarity
+    materiality: Materiality
+    #: Fixed "official" for G1 (NSE filings). The field exists now, not
+    #: because G1 varies, so G2/G3 (mainstream news, social) slot into the
+    #: same schema later without a migration.
+    source_credibility: str
+    risk_flag: bool
+    risk_reason: str | None
+    model_id: str
+    prompt_version: int
+    extracted_at: datetime
+
+    def __post_init__(self) -> None:
+        if not self.announcement_seq_id or not self.announcement_seq_id.strip():
+            raise DataIntegrityError(
+                "extracted event: announcement_seq_id cannot be empty"
+            )
+        if self.risk_flag and not (self.risk_reason or "").strip():
+            raise DataIntegrityError(
+                f"{self.announcement_seq_id}: risk_flag is set but "
+                "risk_reason is empty -- a risk flag without a reason is "
+                "not traceable to anything"
+            )

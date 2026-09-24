@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Personal swing-trading analysis and scoring tool for Indian equities and precious metals"
 requires-python = ">=3.11"
 dependencies = [
+    "anthropic>=0.69",
     "exchange-calendars>=4.13",
     "pandas>=2.2",
     "requests>=2.32",

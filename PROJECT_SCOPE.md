@@ -26,24 +26,37 @@ full 31-session delivery window, and all four regime gates reporting.
 | Cron scheduling | ✅ (opt-in install) |
 | Local web UI — dashboard, stock detail, backtest, journal | ✅ |
 | Backtest / signal evaluation (IC, quintile spread) | ✅ |
-| News/sentiment — G1 NSE corporate announcements (fetch, parse, store) | ✅ (data plumbing only, not wired into refresh/scan) |
+| News/sentiment — G1 NSE announcements + G4 LLM extraction | ✅ (needs `ANTHROPIC_API_KEY`; not wired into refresh/scan) |
 
 Not yet built: watchlist background jobs (§3.4), real-time lookup (§3.5),
-G4 sentiment extraction and G2/G3 sources (§3.6), LLM concluder (§3.7).
+G2/G3 sources (§3.6), LLM concluder (§3.7).
 
 **§3.6 in progress (Sep 2026).** G1 (NSE/BSE corporate announcements) is
 built: `announcements.py` fetches, parses and stores structured filings per
 instrument, keyed on NSE's own `seq_id` for idempotent upserts. No
 truncation defect was found on this endpoint after testing 30–365 day
 lookback windows (a false positive from an earlier test script, corrected
-before shipping — see the module docstring). This is raw structured data
-only — no sentiment, no event classification, and nothing here is scored;
-G0 forbids sentiment as a directional score input. G4 (LLM-based structured
-extraction into event type/polarity/materiality) is the natural next step
-but has real, recurring per-item LLM cost that has not yet been sized —
-flagged for discussion before building, per the cost-flagging rule in
-CLAUDE.md. G2 (mainstream news RSS) and G3 (social, already [OPEN] on cost
-grounds) are unbuilt.
+before shipping — see the module docstring).
+
+G4 (LLM structured extraction) is also built: `sentiment.py` turns each
+announcement into event_type/entities/polarity/materiality/risk_flag via
+Claude Sonnet 5 on the Batch API (user's choice over Haiku 4.5 after
+sizing). Cost was measured, not guessed, before building: 485 real
+announcements across the Nifty 50 over 30 days (~16/day universe-wide) →
+roughly $0.70–$1/month at Sonnet 5 batch rates, a few dollars/month even
+generously assuming an earnings-season spike. Two-phase (`submit_*`/
+`collect_*`) because the Batch API is asynchronous — up to 24h — so this is
+not one synchronous call like the rest of the data layer. Degrades to a
+clear "not configured" report without `ANTHROPIC_API_KEY`, mirroring
+`notify.py`'s Telegram pattern exactly; verified live against the real
+project database in that state (21 real unextracted announcements, correct
+graceful report, nothing crashed). Nothing here is scored — G0 forbids
+sentiment as a directional score input, and `scoring.py` does not import
+`sentiment.py`. Not yet wired into `refresh`/`scan`: a daily job cannot
+synchronously await a job that can take a day, so the submit/collect
+cadence is its own scheduling decision, left for a follow-up task. G2
+(mainstream news RSS) and G3 (social, already [OPEN] on cost grounds) are
+unbuilt.
 
 **Open finding — the scored universe shows no edge yet.** The first live
 backtest (121 sessions to 2026-09-23) returns a slightly *negative* rank
