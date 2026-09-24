@@ -27,13 +27,20 @@ shape as an unconfigured Telegram digest. `--skip-announcements` and
 `--skip-sentiment` disable each independently.
 
 Module map: `calendar` → `storage` → `universe`/`ingestion`/`delivery`/
-`metals`/`announcements` → `refresh` (data layer); `series` → `indicators`/
-`cross_sectional`/`regime` → `scoring` → `journal`/`notify` → `scan`
-(analysis layer); `backtest` and `web` both sit on top and read the same
-store. `sentiment` sits beside `scoring`, not inside it, and is driven by
-`refresh`, not by `scan` -- the daily scan needs a score right now; G4's
+`metals`/`announcements`/`earnings` → `refresh` (data layer); `series` →
+`indicators`/`cross_sectional`/`regime` → `scoring` → `journal`/`notify` →
+`scan` (analysis layer); `backtest` and `web` both sit on top and read the
+same store. `sentiment` sits beside `scoring`, not inside it, and is driven
+by `refresh`, not by `scan` -- the daily scan needs a score right now; G4's
 Batch API can take up to 24h, so it runs on its own submit-then-collect
 cadence across successive `refresh` calls instead.
+
+`earnings` (INDICATORS.md A8, PEAD) fetches real earnings-surprise data via
+`yfinance` and feeds `indicators.pead_signal`, which **is** wired into
+`scoring.score_universe` (`SCORING_VERSION` 3) -- unlike `announcements`/
+`sentiment`, this one directly affects the score, because it is a
+quantitative price/earnings signal, not news/sentiment (invariant 2 is
+about sentiment specifically, not every non-price data source).
 
 `announcements` (INDICATORS.md G1) is data plumbing only -- structured NSE
 corporate filings, fetched and stored, never scored. `sentiment`

@@ -38,6 +38,11 @@ from algorix.delivery import (
     NseBhavcopyClient,
     ingest_delivery,
 )
+from algorix.earnings import (
+    EarningsIngestReport,
+    YFinanceEarningsClient,
+    ingest_earnings,
+)
 from algorix.exceptions import AlgorixError, DataUnavailableError
 from algorix.ingestion import IngestReport, YFinanceBarSource, ingest_instrument
 from algorix.metals import METAL_INSTRUMENTS, seed_metal_instruments
@@ -116,6 +121,7 @@ class RefreshReport:
     #: This run's own attempt to submit newly-unextracted announcements.
     #: None only when sentiment was skipped outright (`skip_sentiment`).
     sentiment_submission: SubmissionReport | None = None
+    earnings_reports: list[EarningsIngestReport] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -133,6 +139,10 @@ class RefreshReport:
     @property
     def announcements_stored(self) -> int:
         return sum(r.stored for r in self.announcement_reports)
+
+    @property
+    def earnings_stored(self) -> int:
+        return sum(r.stored for r in self.earnings_reports)
 
     @property
     def events_extracted(self) -> int:
@@ -172,6 +182,8 @@ class RefreshReport:
             lines.append(f"Gaps:         {', '.join(self.instruments_with_gaps)}")
         if self.announcement_reports:
             lines.append(f"Announcements: {self.announcements_stored} stored")
+        if self.earnings_reports:
+            lines.append(f"Earnings:     {self.earnings_stored} surprises stored")
         if self.sentiment_collected:
             failed = sum(len(r.failed) for r in self.sentiment_collected)
             lines.append(
@@ -223,6 +235,7 @@ def refresh(
     skip_delivery: bool = False,
     skip_announcements: bool = False,
     skip_sentiment: bool = False,
+    skip_earnings: bool = False,
     index_symbol: str = NIFTY_50,
     initial_history_days: int = DEFAULT_INITIAL_HISTORY_DAYS,
     overlap_sessions: int = DEFAULT_OVERLAP_SESSIONS,
@@ -236,6 +249,7 @@ def refresh(
     bhavcopy_client: NseBhavcopyClient | None = None,
     announcements_client: NseAnnouncementsClient | None = None,
     extractor: AnthropicExtractor | None = None,
+    earnings_client: YFinanceEarningsClient | None = None,
 ) -> RefreshReport:
     """Bring the database up to date through the last completed session.
 
@@ -249,6 +263,11 @@ def refresh(
     degrades to a report rather than an error when unconfigured -- see
     `sentiment.py`'s module docstring -- so leaving `skip_sentiment` False
     with no key set is safe, not a failure mode.
+
+    `skip_earnings` (A8/PEAD) is its own switch: unlike announcements/
+    sentiment it needs no NSE call at all -- yfinance is already a
+    dependency for bars -- so there is little reason to disable it, but the
+    option exists for symmetry and for isolating a slow/failing feed.
     """
     calendar = calendar or TradingCalendar()
     now = now or datetime.now(IST)
@@ -384,6 +403,28 @@ def refresh(
                     f"announcements {symbol}: {type(exc).__name__}: {exc}"
                 )
 
+    # -- earnings surprises (A8, PEAD) ---------------------------------------
+    earnings_reports: list[EarningsIngestReport] = []
+
+    if not skip_earnings:
+        earnings_client = earnings_client or YFinanceEarningsClient()
+        for instrument, instrument_id in instruments:
+            if (
+                instrument.exchange is not Exchange.NSE
+                or instrument.instrument_type is InstrumentType.INDEX
+            ):
+                continue
+            try:
+                earnings_reports.append(
+                    ingest_earnings(
+                        db, instrument, instrument_id, client=earnings_client
+                    )
+                )
+            except AlgorixError as exc:
+                errors.append(
+                    f"earnings {instrument.symbol}: {type(exc).__name__}: {exc}"
+                )
+
     # -- sentiment extraction (G4) ------------------------------------------
     # Two-phase, not one: the Batch API is asynchronous (up to 24h), so a
     # run first tries to collect whatever earlier submissions have finished,
@@ -428,6 +469,7 @@ def refresh(
         announcement_reports=announcement_reports,
         sentiment_collected=sentiment_collected,
         sentiment_submission=sentiment_submission,
+        earnings_reports=earnings_reports,
         errors=errors,
     )
 
@@ -565,6 +607,10 @@ def main(argv: list[str] | None = None) -> int:
              "(no-op without ANTHROPIC_API_KEY regardless)",
     )
     parser.add_argument(
+        "--skip-earnings", action="store_true",
+        help="do not fetch A8 earnings-surprise history",
+    )
+    parser.add_argument(
         "--index", default=NIFTY_50,
         help="index to track (NIFTY50, NIFTY200, NIFTY500, NIFTYMIDCAP150)",
     )
@@ -586,6 +632,7 @@ def main(argv: list[str] | None = None) -> int:
         skip_delivery=args.skip_delivery,
         skip_announcements=args.skip_announcements,
         skip_sentiment=args.skip_sentiment,
+        skip_earnings=args.skip_earnings,
         index_symbol=args.index.upper(),
         initial_history_days=args.history_days,
     )

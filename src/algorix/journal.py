@@ -38,7 +38,13 @@ from algorix.storage import Database
 #: SECTOR_DEMEANED_CONTRIBUTORS) -- a score from v1 and one from v2 answer
 #: different questions ("strong overall" vs "strong for its sector") and
 #: must never be compared as though they were the same number.
-SCORING_VERSION = 2
+#:
+#: 3 (Sep 2026): A8 (post-earnings drift) added as a 7th equal-weighted
+#: contributor (INDICATORS.md Bucket F, promoted after a real earnings-
+#: surprise feed was confirmed obtainable -- see earnings.py). A v2 score
+#: was an average of 6 signals; a v3 score of up to 7, with A8 active only
+#: for the minority of names with a recent report. Not the same number.
+SCORING_VERSION = 3
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS scan_runs (

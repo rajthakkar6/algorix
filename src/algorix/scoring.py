@@ -39,11 +39,12 @@ from algorix.indicators import (
     delivery_trend,
     donchian_position,
     pct_of_52_week_high,
+    pead_signal,
     relative_volume,
     short_term_return,
     trend_state,
 )
-from algorix.models import DeliveryRecord
+from algorix.models import DeliveryRecord, EarningsSurpriseRecord
 from algorix.series import IndicatorValue, PriceSeries
 
 #: Contributors required before a score is emitted. Below this the score
@@ -264,9 +265,10 @@ def _trend_to_score(series: PriceSeries, calendar) -> IndicatorValue:
 #: (INDICATORS.md's own diagnosis: A2-A4 are restatements of A1, not
 #: independent evidence). A concentrated sector move shows up in all four
 #: together, which is what put every Nifty 50 IT name in the bottom five
-#: ranks in the Sep 2026 walk-forward test. A5 (short-term reversal) and A6
-#: (delivery accumulation) are different effects and did not show the same
-#: pileup, so they are left on the raw universe-wide comparison.
+#: ranks in the Sep 2026 walk-forward test. A5 (short-term reversal), A6
+#: (delivery accumulation) and A8 (post-earnings drift) are different,
+#: idiosyncratic-to-the-company effects that did not show the same
+#: sector-wide pileup, so they are left on the raw universe-wide comparison.
 SECTOR_DEMEANED_CONTRIBUTORS = ("A1", "A2", "A3", "A4")
 
 
@@ -278,13 +280,15 @@ def score_universe(
     calendar: TradingCalendar | None = None,
     universe_label: str = "NIFTY50",
     industry_by_symbol: dict[str, str | None] | None = None,
+    earnings_by_symbol: dict[str, list[EarningsSurpriseRecord]] | None = None,
 ) -> ScoredUniverse:
     """Score every instrument against its peers.
 
     Contributors (equal weight, each ranked cross-sectionally):
       A1 momentum composite, A2 52-week high proximity, A3 trend state,
       A4 Donchian position (confirmed by A7 relative volume),
-      A5 short-term pullback (inverted), A6 delivery trend.
+      A5 short-term pullback (inverted), A6 delivery trend,
+      A8 post-earnings drift (recent earnings surprise, when one exists).
 
     When `industry_by_symbol` is supplied, A1-A4 are demeaned against their
     sector's average before ranking -- see `sector_demean`. Without it, this
@@ -294,8 +298,15 @@ def score_universe(
     `SCORING_VERSION` was bumped when this was introduced, so a session
     scored the old way and one scored the new way are never silently
     compared as though comparable.
+
+    `earnings_by_symbol` (a stock's `EarningsSurpriseRecord` history, caller-
+    bounded to `end=as_of` the same way `delivery_by_symbol` is) drives A8.
+    Unlike A1-A6, most of the universe will not have a recent enough report
+    to be scored on it at any given moment -- that is A8's correct,
+    event-driven behaviour, not a data gap; see `pead_signal`.
     """
     delivery_by_symbol = delivery_by_symbol or {}
+    earnings_by_symbol = earnings_by_symbol or {}
     sector_neutral = bool(industry_by_symbol)
 
     raw: dict[str, dict[str, IndicatorValue]] = {
@@ -305,6 +316,7 @@ def score_universe(
         "A4": {},
         "A5": {},
         "A6": {},
+        "A8": {},
     }
 
     for symbol, series in series_by_symbol.items():
@@ -340,6 +352,10 @@ def score_universe(
 
         raw["A6"][symbol] = delivery_trend(delivery_by_symbol.get(symbol, []))
 
+        raw["A8"][symbol] = pead_signal(
+            earnings_by_symbol.get(symbol, []), as_of, calendar
+        )
+
     # `raw` keeps the true, human-readable values (52w-high %, trend flag
     # average, ...) for the Contribution breakdown shown to the user.
     # Demeaning only changes what feeds the percentile ranking below --
@@ -363,6 +379,7 @@ def score_universe(
         "A4": ("breakout", "breakout position"),
         "A5": ("pullback", "short-term pullback"),
         "A6": ("delivery", "delivery accumulation"),
+        "A8": ("earnings drift", "post-earnings surprise drift"),
     }
 
     scores: dict[str, StockScore] = {}

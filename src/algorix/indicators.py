@@ -19,8 +19,10 @@ import statistics
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from algorix.calendar import TradingCalendar
-from algorix.models import DeliveryRecord
+from datetime import date
+
+from algorix.calendar import CalendarRangeError, TradingCalendar
+from algorix.models import DeliveryRecord, EarningsSurpriseRecord
 from algorix.series import DEFAULT_MIN_COMPLETENESS, IndicatorValue, PriceSeries
 
 # -- Standard windows -------------------------------------------------------
@@ -60,6 +62,17 @@ MOMENTUM_SKIP = 21
 #: A6 delivery-trend windows, in published sessions.
 DELIVERY_RECENT = 5
 DELIVERY_BASELINE = 20
+
+#: A8: how long a reported earnings surprise stays "active" for scoring.
+#: 60 sessions (~one quarter) is the standard window in the PEAD literature
+#: (Bernard & Thomas and related work), used deliberately instead of this
+#: project's own live test, which showed the measured IC fading between 10
+#: and 20 sessions on ~27 independent reporting weeks -- too small a sample
+#: to hand-tune a window from without overfitting exactly the way
+#: scoring.py's "no hand-tuned weights yet" principle warns against. A
+#: quarter is also a natural boundary: the next report typically supersedes
+#: this one before the window would otherwise expire.
+PEAD_WINDOW_SESSIONS = 60
 
 
 def _guard(
@@ -492,3 +505,54 @@ def realized_volatility_percentile(
     current = readings[-1]
     below = sum(1 for r in readings[:-1] if r < current)
     return IndicatorValue.of((below / (len(readings) - 1)) * 100.0)
+
+
+# ---------------------------------------------------------------------------
+# A8 -- Post-Earnings Announcement Drift
+# ---------------------------------------------------------------------------
+
+
+def pead_signal(
+    records: Sequence[EarningsSurpriseRecord],
+    as_of: date,
+    calendar: TradingCalendar | None = None,
+    window_sessions: int = PEAD_WINDOW_SESSIONS,
+) -> IndicatorValue:
+    """The most recent earnings surprise, if it happened recently enough to
+    still be driving drift (INDICATORS.md A8, see earnings.py).
+
+    `records` is trusted to already be point-in-time bounded by the caller
+    (`end=as_of` on `EarningsSurpriseRepository.get_range`), the same
+    convention `delivery_trend` follows -- this function does not itself
+    guard against seeing a future report.
+
+    A stock that has not reported within `window_sessions` is unavailable,
+    not zero: an old surprise is not "no surprise", it is stale information
+    this signal should not be trusted to still explain the stock's returns.
+    Most of the universe will be unavailable on any given day by
+    construction -- only names that recently reported are ever in-window,
+    which is the correct behaviour for an event-driven signal, not a bug.
+    """
+    if window_sessions <= 0:
+        raise ValueError("window_sessions must be positive")
+    if not records:
+        return IndicatorValue.unavailable("PEAD: no earnings history")
+
+    latest = max(records, key=lambda r: r.report_date)
+    calendar = calendar or TradingCalendar()
+
+    try:
+        cutoff = calendar.trading_days_ago(as_of, window_sessions)
+    except CalendarRangeError:
+        # as_of (or the window's start) falls outside the calendar's
+        # supported range -- cannot establish a window, so this cannot be
+        # scored rather than guessed at.
+        return IndicatorValue.unavailable("PEAD: cannot resolve trading window")
+
+    if latest.report_date < cutoff:
+        return IndicatorValue.unavailable(
+            f"PEAD: latest report {latest.report_date} is outside the "
+            f"{window_sessions}-session window"
+        )
+
+    return IndicatorValue.of(latest.surprise_pct)

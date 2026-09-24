@@ -141,6 +141,25 @@ class FakeAnnouncementsClient:
         )
 
 
+class FakeEarningsClient:
+    """Mirrors FakeAnnouncementsClient's shape for the A8 earnings client."""
+
+    def __init__(self, records_by_symbol=None, error=None):
+        self.records_by_symbol = records_by_symbol or {}
+        self.error = error
+        self.requested: list[str] = []
+
+    def fetch(self, instrument):
+        self.requested.append(instrument.symbol)
+        if self.error:
+            raise self.error
+        from algorix.earnings import EarningsFetchResult
+
+        return EarningsFetchResult(
+            records=self.records_by_symbol.get(instrument.symbol, [])
+        )
+
+
 def run(db, cal, **kwargs):
     defaults = dict(
         now=NOW,
@@ -149,6 +168,7 @@ def run(db, cal, **kwargs):
         index_client=FakeIndexClient(),
         bhavcopy_client=FakeBhavcopyClient(),
         announcements_client=FakeAnnouncementsClient(),
+        earnings_client=FakeEarningsClient(),
         # Sentiment needs ANTHROPIC_API_KEY and costs real (small) money --
         # the pre-existing 34 tests below are about bars/delivery/universe
         # orchestration, not G4, so they stay off it by default. Dedicated
@@ -354,13 +374,14 @@ def test_empty_database_with_universe_skipped_reports_nothing_to_do(tmp_path, ca
     database.migrate()
 
     # Metals always seed, so remove them to reach the genuinely-empty branch.
-    report = refresh(
-        database,
-        now=NOW,
-        calendar=cal,
-        skip_universe=True,
-        skip_delivery=True,
-        bar_source=FakeBarSource(),
+    # GOLDBEES/SILVERBEES are NSE-listed ETFs (see metals.py), so they pass
+    # the same equity filter announcements/earnings use -- this must go
+    # through run() for the fake clients, or it silently hits real NSE and
+    # yfinance for both, exactly like the announcements-only regression
+    # fixed earlier in this file's history.
+    report = run(
+        database, cal,
+        skip_universe=True, skip_delivery=True, bar_source=FakeBarSource(),
     )
 
     assert report.bar_reports  # metals are always present
@@ -819,3 +840,86 @@ def test_skip_sentiment_never_touches_the_extractor(db, cal):
 
     assert report.sentiment_submission is None
     assert extractor.submitted == []
+
+
+# --------------------------------------------------------------------------
+# Earnings surprises (A8/PEAD) wired into refresh
+# --------------------------------------------------------------------------
+
+
+def test_refresh_ingests_earnings_for_equities(db, cal):
+    from algorix.models import EarningsSurpriseRecord
+
+    client = FakeEarningsClient(
+        records_by_symbol={
+            "RELIANCE": [
+                EarningsSurpriseRecord(
+                    symbol="RELIANCE", report_date=date(2026, 9, 10),
+                    eps_estimate=14.97, eps_actual=15.48, surprise_pct=3.38,
+                )
+            ],
+        }
+    )
+
+    report = run(db, cal, earnings_client=client)
+
+    assert report.earnings_stored == 1
+    assert "RELIANCE" in client.requested
+
+
+def test_earnings_are_not_fetched_for_index_instruments(db, cal):
+    client = FakeEarningsClient()
+
+    run(db, cal, earnings_client=client)
+
+    # The index and India VIX do not report earnings.
+    assert "NIFTY50" not in client.requested
+    assert "INDIAVIX" not in client.requested
+
+
+def test_refresh_earnings_failure_is_collected_not_fatal(db, cal):
+    from algorix.exceptions import SourceUnreachableError
+
+    client = FakeEarningsClient(error=SourceUnreachableError("yfinance down"))
+
+    report = run(db, cal, earnings_client=client)
+
+    assert report.earnings_reports == []
+    assert any("earnings" in e for e in report.errors)
+    # Bars still landed -- one broken feed does not abandon the run.
+    assert report.bars_stored > 0
+
+
+def test_skip_earnings_fetches_nothing(db, cal):
+    client = FakeEarningsClient()
+
+    report = run(db, cal, skip_earnings=True, earnings_client=client)
+
+    assert report.earnings_reports == []
+    assert client.requested == []
+
+
+def test_refresh_re_ingests_earnings_idempotently(db, cal):
+    """No incremental windowing for earnings (see earnings.py) -- every run
+    re-fetches the small full history and upserts, which must not
+    duplicate rows on a second run."""
+    from algorix.models import EarningsSurpriseRecord
+    from algorix.storage import EarningsSurpriseRepository, InstrumentRepository
+
+    records = {
+        "RELIANCE": [
+            EarningsSurpriseRecord(
+                symbol="RELIANCE", report_date=date(2026, 9, 10),
+                eps_estimate=14.97, eps_actual=15.48, surprise_pct=3.38,
+            )
+        ],
+    }
+
+    run(db, cal, earnings_client=FakeEarningsClient(records_by_symbol=records))
+    run(db, cal, earnings_client=FakeEarningsClient(records_by_symbol=records))
+
+    reliance = InstrumentRepository(db).get("RELIANCE", Exchange.NSE)
+    stored = EarningsSurpriseRepository(db).get_range(
+        reliance.id, date(2000, 1, 1), date(2026, 12, 31)
+    )
+    assert len(stored) == 1

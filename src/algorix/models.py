@@ -298,3 +298,26 @@ class ExtractedEvent:
                 "risk_reason is empty -- a risk flag without a reason is "
                 "not traceable to anything"
             )
+
+
+@dataclass(frozen=True)
+class EarningsSurpriseRecord:
+    """One reported quarter's earnings vs. its estimate (INDICATORS.md A8,
+    Post-Earnings Announcement Drift).
+
+    Only completed reports are represented -- a future consensus estimate
+    with no actual yet is not a surprise, so it is filtered out before this
+    is ever constructed (see `earnings.py`'s parser). `surprise_pct` is the
+    value scored on; `eps_estimate`/`eps_actual` are kept only for
+    explainability (what a stock's A8 line in the digest is based on).
+    """
+
+    symbol: str
+    report_date: date
+    eps_estimate: float
+    eps_actual: float
+    surprise_pct: float
+
+    def __post_init__(self) -> None:
+        if not self.symbol or not self.symbol.strip():
+            raise DataIntegrityError("earnings surprise: symbol cannot be empty")

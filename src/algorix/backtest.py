@@ -39,10 +39,15 @@ from datetime import date
 from algorix.calendar import TradingCalendar
 from algorix.cross_sectional import compute_universe_momentum
 from algorix.indicators import DELIVERY_BASELINE
-from algorix.models import DeliveryRecord, Exchange
+from algorix.models import DeliveryRecord, EarningsSurpriseRecord, Exchange
 from algorix.scoring import ScoredUniverse, score_universe
 from algorix.series import PriceSeries, load_series
-from algorix.storage import DeliveryRepository, Database, InstrumentRepository
+from algorix.storage import (
+    DeliveryRepository,
+    Database,
+    EarningsSurpriseRepository,
+    InstrumentRepository,
+)
 from algorix.universe import NIFTY_50, ConstituencyRepository
 
 #: Horizons evaluated, in sessions. The swing-trading thesis is days-to-weeks,
@@ -289,6 +294,7 @@ def replay_session(
     calendar: TradingCalendar | None = None,
     universe_label: str = NIFTY_50,
     industry_by_symbol: dict[str, str | None] | None = None,
+    earnings: dict[str, list[EarningsSurpriseRecord]] | None = None,
 ) -> ScoredUniverse:
     """Score one historical session using only data available then."""
     truncated = {
@@ -301,6 +307,13 @@ def replay_session(
         symbol: [r for r in records if r.session_date <= session]
         for symbol, records in delivery.items()
     }
+    # A8's point-in-time discipline: a report from after `session` must not
+    # be visible -- otherwise a backtest would credit the score with an
+    # earnings surprise it could not actually have known about yet.
+    trimmed_earnings = {
+        symbol: [r for r in records if r.report_date <= session]
+        for symbol, records in (earnings or {}).items()
+    }
 
     momentum = compute_universe_momentum(truncated, session, calendar)
     return score_universe(
@@ -311,6 +324,7 @@ def replay_session(
         calendar=calendar,
         universe_label=universe_label,
         industry_by_symbol=industry_by_symbol,
+        earnings_by_symbol=trimmed_earnings,
     )
 
 
@@ -330,6 +344,7 @@ def run_backtest(
 
     instrument_repo = InstrumentRepository(db)
     delivery_repo = DeliveryRepository(db)
+    earnings_repo = EarningsSurpriseRepository(db)
     constituency = ConstituencyRepository(db)
 
     caveats: list[str] = []
@@ -358,6 +373,7 @@ def run_backtest(
     # Load each instrument's full history once, then slice per session.
     full_series: dict[str, PriceSeries] = {}
     delivery: dict[str, list[DeliveryRecord]] = {}
+    earnings: dict[str, list[EarningsSurpriseRecord]] = {}
     industry_by_symbol: dict[str, str | None] = {}
     earliest_delivery: date | None = None
 
@@ -384,6 +400,9 @@ def run_backtest(
             earliest_delivery = (
                 first if earliest_delivery is None else min(earliest_delivery, first)
             )
+        earnings_records = earnings_repo.get_range(instrument.id, date(2000, 1, 1), end)
+        if earnings_records:
+            earnings[symbol] = earnings_records
 
     if not full_series:
         # Caveats accumulated above must survive an early exit -- a result
@@ -409,6 +428,14 @@ def run_backtest(
             "comparable to later ones."
         )
 
+    if not earnings:
+        caveats.append(
+            "No earnings-surprise data stored: A8 (PEAD) was absent "
+            "throughout, and unlike A6 it is only ever active for the "
+            "minority of the universe with a recent report even when data "
+            "exists, so its absence here is easy to miss in the numbers."
+        )
+
     caveats.append(
         "Prices are split/dividend-adjusted as of today, so historical bars "
         "reflect corporate actions that had not yet happened at the time."
@@ -423,6 +450,7 @@ def run_backtest(
         universe = replay_session(
             session, full_series, delivery, calendar, index_symbol,
             industry_by_symbol=industry_by_symbol,
+            earnings=earnings,
         )
         ranked = [s for s in universe.scores.values() if s.score.available]
 

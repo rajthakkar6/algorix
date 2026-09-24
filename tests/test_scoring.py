@@ -419,3 +419,98 @@ def test_risk_is_not_a_score_contribution():
     assert "C1" not in codes
     assert "C2" not in codes
     assert top.risk is not None  # present, but separate
+
+
+# ---------------------------------------------------------------------------
+# A8 -- Post-Earnings Announcement Drift
+# ---------------------------------------------------------------------------
+
+
+def test_a8_is_missing_without_earnings_data():
+    """The default, backward-compatible case: no earnings_by_symbol means
+    A8 contributes nothing, exactly as before it existed."""
+    universe = scored(STANDARD)
+
+    for score in universe.ranked():
+        by_code = {c.code for c in score.contributions}
+        assert "A8" not in by_code
+        assert "earnings drift" in score.missing
+
+
+def earnings_for(surprise_by_symbol, days_ago=5):
+    """EarningsSurpriseRecord fixtures for several symbols at once --
+    A8's ranking cohort needs MIN_COHORT (10) members to be usable, so a
+    single-stock earnings dict cannot exercise the full scoring pipeline."""
+    from algorix.models import EarningsSurpriseRecord
+
+    return {
+        symbol: [
+            EarningsSurpriseRecord(
+                symbol=symbol, report_date=AS_OF - timedelta(days=days_ago),
+                eps_estimate=10.0, eps_actual=10.0 * (1 + surprise / 100),
+                surprise_pct=surprise,
+            )
+        ]
+        for symbol, surprise in surprise_by_symbol.items()
+    }
+
+
+#: 10 members (S2-S11) -- clears MIN_COHORT. S0/S1 deliberately excluded,
+#: to test the "no recent earnings" case within the same scored universe.
+A8_COHORT = {f"S{i}": float(i * 5) for i in range(2, 12)}
+
+
+def test_a8_contributes_for_a_stock_with_a_recent_surprise():
+    universe = scored(STANDARD, earnings_by_symbol=earnings_for(A8_COHORT))
+
+    scored_stock = universe.scores["S11"]
+    by_code = {c.code: c for c in scored_stock.contributions}
+    assert "A8" in by_code
+    assert by_code["A8"].raw.value == pytest.approx(55.0)
+    assert "earnings drift" not in scored_stock.missing
+
+
+def test_a8_absent_for_stocks_with_no_recent_earnings_even_when_others_have_it():
+    universe = scored(STANDARD, earnings_by_symbol=earnings_for(A8_COHORT))
+
+    s0 = universe.scores["S0"]
+    assert "A8" not in {c.code for c in s0.contributions}
+    assert "earnings drift" in s0.missing
+
+
+def test_a8_stale_earnings_do_not_contribute():
+    universe = scored(
+        STANDARD, earnings_by_symbol=earnings_for(A8_COHORT, days_ago=200)
+    )
+
+    assert "A8" not in {c.code for c in universe.scores["S11"].contributions}
+
+
+def test_a8_is_not_sector_demeaned():
+    """A8 is a company-idiosyncratic effect (see scoring.py's
+    SECTOR_DEMEANED_CONTRIBUTORS comment) -- its percentile must be
+    identical with or without sector data supplied."""
+    earnings = earnings_for(A8_COHORT)
+    industry = {f"S{i}": "TestSector" for i in range(12)}
+
+    plain = scored(STANDARD, earnings_by_symbol=earnings)
+    neutral = scored(STANDARD, earnings_by_symbol=earnings, industry_by_symbol=industry)
+
+    plain_a8 = next(
+        c.percentile for c in plain.scores["S11"].contributions if c.code == "A8"
+    )
+    neutral_a8 = next(
+        c.percentile for c in neutral.scores["S11"].contributions if c.code == "A8"
+    )
+    assert plain_a8 == pytest.approx(neutral_a8)
+
+
+def test_a8_negative_surprise_scores_low():
+    cohort = dict(A8_COHORT)
+    cohort["S2"] = -30.0  # a clear miss, well below the rest of the cohort
+
+    universe = scored(STANDARD, earnings_by_symbol=earnings_for(cohort))
+
+    miss = next(c for c in universe.scores["S2"].contributions if c.code == "A8")
+    beat = next(c for c in universe.scores["S11"].contributions if c.code == "A8")
+    assert beat.percentile > miss.percentile

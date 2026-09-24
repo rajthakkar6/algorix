@@ -482,3 +482,116 @@ def test_latest_delivery_pct_with_no_published_sessions():
     result = latest_delivery_pct(_delivery([None, None]))
 
     assert result.available is False
+
+
+# ---------------------------------------------------------------------------
+# A8 -- PEAD
+# ---------------------------------------------------------------------------
+
+
+def _earnings(report_date, surprise_pct=5.0, symbol="RELIANCE"):
+    from algorix.models import EarningsSurpriseRecord
+
+    return EarningsSurpriseRecord(
+        symbol=symbol, report_date=report_date,
+        eps_estimate=10.0, eps_actual=10.0 * (1 + surprise_pct / 100),
+        surprise_pct=surprise_pct,
+    )
+
+
+def test_pead_scores_a_recent_surprise():
+    from algorix.indicators import pead_signal
+
+    cal = TradingCalendar()
+    records = [_earnings(date(2026, 7, 17), surprise_pct=3.38)]
+
+    result = pead_signal(records, date(2026, 9, 24), cal)
+
+    assert result.available is True
+    assert result.value == pytest.approx(3.38)
+
+
+def test_pead_picks_the_most_recent_report():
+    from algorix.indicators import pead_signal
+
+    cal = TradingCalendar()
+    records = [
+        _earnings(date(2026, 4, 24), surprise_pct=-18.52),
+        _earnings(date(2026, 7, 17), surprise_pct=3.38),
+    ]
+
+    result = pead_signal(records, date(2026, 9, 24), cal)
+
+    assert result.value == pytest.approx(3.38)
+
+
+def test_pead_negative_surprise_is_preserved_as_negative():
+    """A miss must not be clamped or inverted -- the sign is the signal."""
+    from algorix.indicators import pead_signal
+
+    cal = TradingCalendar()
+    records = [_earnings(date(2026, 9, 1), surprise_pct=-25.0)]
+
+    result = pead_signal(records, date(2026, 9, 24), cal)
+
+    assert result.value == pytest.approx(-25.0)
+
+
+# -- negative -----------------------------------------------------------
+
+
+def test_pead_with_no_history_is_unavailable():
+    from algorix.indicators import pead_signal
+
+    result = pead_signal([], date(2026, 9, 24), TradingCalendar())
+
+    assert result.available is False
+    assert "no earnings history" in result.reason
+
+
+def test_pead_stale_report_outside_window_is_unavailable():
+    """An old surprise is stale information, not zero -- see A6's identical
+    unavailable-vs-zero rule for delivery."""
+    from algorix.indicators import pead_signal
+
+    cal = TradingCalendar()
+    records = [_earnings(date(2026, 4, 24), surprise_pct=10.0)]
+
+    # ~5 months later -- well past the 60-session (~1 quarter) window.
+    result = pead_signal(records, date(2026, 9, 24), cal)
+
+    assert result.available is False
+    assert "outside the 60-session window" in result.reason
+
+
+def test_pead_right_at_the_window_boundary_is_available():
+    from algorix.indicators import PEAD_WINDOW_SESSIONS, pead_signal
+
+    cal = TradingCalendar()
+    as_of = date(2026, 9, 24)
+    boundary = cal.trading_days_ago(as_of, PEAD_WINDOW_SESSIONS)
+    records = [_earnings(boundary, surprise_pct=1.0)]
+
+    result = pead_signal(records, as_of, cal)
+
+    assert result.available is True
+
+
+def test_pead_rejects_non_positive_window():
+    from algorix.indicators import pead_signal
+
+    with pytest.raises(ValueError, match="positive"):
+        pead_signal([_earnings(date(2026, 9, 1))], date(2026, 9, 24), window_sessions=0)
+
+
+def test_pead_out_of_calendar_range_is_unavailable_not_an_error():
+    from algorix.indicators import pead_signal
+
+    cal = TradingCalendar()
+    records = [_earnings(date(2007, 1, 1), surprise_pct=1.0)]
+
+    # Deliberately before the calendar's supported range once the window
+    # is subtracted -- must degrade cleanly, not raise.
+    result = pead_signal(records, date(2006, 10, 1), cal)
+
+    assert result.available is False

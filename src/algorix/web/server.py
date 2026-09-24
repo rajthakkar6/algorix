@@ -29,6 +29,7 @@ from algorix.config import Config
 from algorix.cross_sectional import compute_universe_momentum
 from algorix.indicators import (
     DELIVERY_BASELINE,
+    PEAD_WINDOW_SESSIONS,
     atr_percent,
     delivery_trend,
     donchian_position,
@@ -50,7 +51,12 @@ from algorix.regime import (
 from algorix.scan import SCAN_LOOKBACK_SESSIONS
 from algorix.scoring import score_universe
 from algorix.series import load_series
-from algorix.storage import DeliveryRepository, Database, InstrumentRepository
+from algorix.storage import (
+    DeliveryRepository,
+    Database,
+    EarningsSurpriseRepository,
+    InstrumentRepository,
+)
 from algorix.universe import NIFTY_50, ConstituencyRepository
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -107,12 +113,14 @@ def _load_universe(as_of: date, index_symbol: str):
     db, calendar = _db(), _calendar()
     instrument_repo = InstrumentRepository(db)
     delivery_repo = DeliveryRepository(db)
+    earnings_repo = EarningsSurpriseRepository(db)
 
     symbols = ConstituencyRepository(db).current_constituents(
         index_symbol, on=as_of
     )
-    series, delivery, ids, industry = {}, {}, {}, {}
+    series, delivery, ids, industry, earnings = {}, {}, {}, {}, {}
     delivery_start = calendar.trading_days_ago(as_of, DELIVERY_BASELINE * 2)
+    earnings_start = calendar.trading_days_ago(as_of, PEAD_WINDOW_SESSIONS)
 
     for symbol in symbols:
         instrument = instrument_repo.get(symbol, Exchange.NSE)
@@ -126,7 +134,10 @@ def _load_universe(as_of: date, index_symbol: str):
             instrument.id, delivery_start, as_of
         )
         industry[symbol] = instrument.industry
-    return series, delivery, ids, industry
+        earnings[symbol] = earnings_repo.get_range(
+            instrument.id, earnings_start, as_of
+        )
+    return series, delivery, ids, industry, earnings
 
 
 def _current_session() -> date:
@@ -140,7 +151,7 @@ def dashboard(request: Request, top: int = 25):
     index_symbol = _index()
     as_of = _current_session()
 
-    series, delivery, _, industry = _load_universe(as_of, index_symbol)
+    series, delivery, _, industry, earnings = _load_universe(as_of, index_symbol)
     if not series:
         return TEMPLATES.TemplateResponse(
             request=request,
@@ -152,7 +163,7 @@ def dashboard(request: Request, top: int = 25):
     universe = score_universe(
         series, momentum, as_of, delivery_by_symbol=delivery,
         calendar=calendar, universe_label=index_symbol,
-        industry_by_symbol=industry,
+        industry_by_symbol=industry, earnings_by_symbol=earnings,
     )
 
     instrument_repo = InstrumentRepository(db)

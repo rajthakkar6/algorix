@@ -35,6 +35,7 @@ from algorix.models import (
     Bar,
     CalendarPolicy,
     DeliveryRecord,
+    EarningsSurpriseRecord,
     EventType,
     Exchange,
     ExtractedEvent,
@@ -212,6 +213,26 @@ CREATE TABLE IF NOT EXISTS extraction_batches (
 );
 """
 
+# A8 (INDICATORS.md Bucket F -> promoted): Post-Earnings Announcement Drift.
+# One row per completed quarterly report -- yfinance's own estimate/actual,
+# not NSE's (NSE publishes the raw result, not a pre-earnings consensus to
+# compare it against). Keyed on (instrument_id, report_date): a company
+# reports at most once per date, and re-ingesting is a small, cheap full
+# re-pull (yfinance returns ~25 rows total, not an incremental feed), so
+# upserting the same date twice must update in place, not duplicate.
+_SCHEMA_V8 = """
+CREATE TABLE IF NOT EXISTS earnings_surprises (
+    instrument_id   INTEGER NOT NULL REFERENCES instruments(id) ON DELETE CASCADE,
+    report_date     TEXT    NOT NULL,
+    eps_estimate    REAL    NOT NULL,
+    eps_actual      REAL    NOT NULL,
+    surprise_pct    REAL    NOT NULL,
+    source          TEXT    NOT NULL,
+    ingested_at     TEXT    NOT NULL,
+    PRIMARY KEY (instrument_id, report_date)
+);
+"""
+
 #: Ordered migrations. Each runs once, in version order, against databases
 #: older than it. Never edit a migration that has shipped -- add a new one.
 _MIGRATIONS: list[tuple[int, str]] = [
@@ -222,6 +243,7 @@ _MIGRATIONS: list[tuple[int, str]] = [
     (5, _SCHEMA_V5),
     (6, _SCHEMA_V6),
     (7, _SCHEMA_V7),
+    (8, _SCHEMA_V8),
 ]
 
 SCHEMA_VERSION = _MIGRATIONS[-1][0]
@@ -948,6 +970,102 @@ def _row_to_batch(row: sqlite3.Row) -> ExtractionBatch:
             else None
         ),
     )
+
+
+class EarningsSurpriseRepository:
+    """Read/write access to A8 earnings-surprise history."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    def upsert_many(
+        self,
+        instrument_id: int,
+        records: Iterable[EarningsSurpriseRecord],
+        source: str,
+    ) -> int:
+        rows = [
+            (
+                instrument_id,
+                rec.report_date.isoformat(),
+                rec.eps_estimate,
+                rec.eps_actual,
+                rec.surprise_pct,
+                source,
+                _utc_now_iso(),
+            )
+            for rec in records
+        ]
+        if not rows:
+            return 0
+
+        with self.db.connect() as conn:
+            try:
+                conn.executemany(
+                    """
+                    INSERT INTO earnings_surprises
+                        (instrument_id, report_date, eps_estimate, eps_actual,
+                         surprise_pct, source, ingested_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (instrument_id, report_date) DO UPDATE SET
+                        eps_estimate = excluded.eps_estimate,
+                        eps_actual   = excluded.eps_actual,
+                        surprise_pct = excluded.surprise_pct,
+                        source       = excluded.source,
+                        ingested_at  = excluded.ingested_at
+                    """,
+                    rows,
+                )
+            except sqlite3.IntegrityError as exc:
+                raise StorageError(
+                    f"Rejected earnings surprise data for instrument "
+                    f"{instrument_id}: {exc}"
+                ) from exc
+        return len(rows)
+
+    def get_range(
+        self, instrument_id: int, start: date, end: date
+    ) -> list[EarningsSurpriseRecord]:
+        """Reports between `start` and `end` inclusive, oldest first.
+
+        Mirrors `DeliveryRepository.get_range`/`AnnouncementRepository.get_range`
+        exactly: the *caller* is what enforces point-in-time correctness by
+        passing `end=as_of`, not this method or the indicator function that
+        consumes its result -- the same convention every other time-bounded
+        signal in this codebase follows, so a backtest replaying a past
+        session cannot see a report that had not happened yet.
+        """
+        if start > end:
+            raise ValueError(f"start {start} is after end {end}")
+
+        with self.db.connect() as conn:
+            symbol_row = conn.execute(
+                "SELECT symbol FROM instruments WHERE id = ?", (instrument_id,)
+            ).fetchone()
+            if symbol_row is None:
+                return []
+            symbol = symbol_row["symbol"]
+
+            rows = conn.execute(
+                """
+                SELECT report_date, eps_estimate, eps_actual, surprise_pct
+                FROM earnings_surprises
+                WHERE instrument_id = ? AND report_date BETWEEN ? AND ?
+                ORDER BY report_date ASC
+                """,
+                (instrument_id, start.isoformat(), end.isoformat()),
+            ).fetchall()
+
+        return [
+            EarningsSurpriseRecord(
+                symbol=symbol,
+                report_date=date.fromisoformat(r["report_date"]),
+                eps_estimate=r["eps_estimate"],
+                eps_actual=r["eps_actual"],
+                surprise_pct=r["surprise_pct"],
+            )
+            for r in rows
+        ]
 
 
 def _row_to_instrument(row: sqlite3.Row) -> Instrument:

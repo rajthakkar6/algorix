@@ -18,7 +18,7 @@ full 31-session delivery window, and all four regime gates reporting.
 | Layer | Status |
 |---|---|
 | Data layer — calendar, storage, universe, prices, delivery, metals, orchestration | ✅ |
-| Indicators — A1–A7 score contributors, C1–C2 risk inputs | ✅ |
+| Indicators — A1–A8 score contributors (A8/PEAD added Sep 2026), C1–C2 risk inputs | ✅ |
 | Regime gates — B1 breadth, B2 India VIX, B3 efficiency ratio, B4 FII/DII | ✅ |
 | Composite scoring + eligibility gates + ATR risk sizing | ✅ |
 | Trade journal | ✅ |
@@ -30,6 +30,18 @@ full 31-session delivery window, and all four regime gates reporting.
 
 Not yet built: watchlist background jobs (§3.4), real-time lookup (§3.5),
 G2/G3 sources (§3.6), LLM concluder (§3.7).
+
+**A8 (PEAD) added Sep 2026.** INDICATORS.md Bucket F deferred this pending
+an obtainable earnings-surprise feed. One was found and confirmed:
+`yfinance` (already a dependency) covers 49 of 50 Nifty 50 names, cross-
+verified against a real NSE announcement date. Tested for signal on real
+price history before building (390 real events, IC +0.10 to +0.12 across
+5/10/20-day horizons) — see INDICATORS.md A8 for the full evidence,
+including the one unresolved risk (estimate-field provenance is
+undocumented) and an honest composite-level check after building: the
+event-level signal does not move the full composite's own non-overlapping
+IC (-0.008 without A8, -0.009 with), because A8 is active for only a
+minority of the universe on any given day. `SCORING_VERSION` bumped 2→3.
 
 **§3.6 in progress (Sep 2026).** G1 (NSE/BSE corporate announcements) is
 built: `announcements.py` fetches, parses and stores structured filings per

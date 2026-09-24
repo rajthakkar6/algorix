@@ -185,6 +185,48 @@ reads `cross-sectional:NIFTY50:sector-neutral` for scores that used it.
 - **Why:** volume has weak standalone directional value but meaningful value
   confirming a breakout. Scoped as a modifier, not a contributor.
 
+### A8. Post-Earnings Announcement Drift (PEAD) — promoted from Bucket F, Sep 2026
+- **What:** most recent earnings surprise % (actual vs. estimate), active
+  only for `PEAD_WINDOW_SESSIONS` (60 sessions, ~one quarter) after the
+  report; unavailable, not zero, once stale or if no report has ever
+  landed. Most of the universe is unavailable on any given day by
+  construction — an event-driven signal, not a permanent one.
+- **Why promoted:** this bucket originally deferred PEAD pending "an
+  earnings-surprise feed... the constraint is data sourcing in India, not
+  merit." Resolved: `yfinance` (already a dependency) exposes
+  `Ticker.earnings_dates` with real estimate/actual/surprise% coverage
+  across 49 of 50 Nifty 50 names, cross-verified against NSE's own
+  "Outcome of Board Meeting" announcement date for at least one real
+  report (see `earnings.py`'s module docstring). Before building, a 390-
+  event pooled test on real price history found IC +0.10 to +0.12 at
+  5/10/20 day horizons — positive at every horizon, matching PEAD's
+  documented direction; grouped into ~27 independent-ish reporting weeks,
+  the 10-day IC (+0.127, t=+1.99) sits at the edge of significance, the
+  strongest result found anywhere in this project's validation work.
+- **Known risk, not yet resolved:** yfinance's "EPS Estimate" field
+  provenance is undocumented. If it is back-filled after the actual result
+  rather than being a genuine pre-earnings consensus, the measured IC
+  above is inflated by hindsight the live scanner does not have. No
+  historical snapshot exists to test this directly — worth watching as
+  real journalled scores accumulate.
+- **Window, deliberately not hand-tuned:** 60 sessions is the literature-
+  standard PEAD window (Bernard & Thomas and related work), used instead
+  of this project's own ~27-week test result (which showed IC fading
+  between 10 and 20 days) — too small a sample to tune a window from
+  without overfitting, exactly what the equal-weighting principle (0.2,
+  scoring.py) exists to avoid.
+- **Not sector-demeaned:** a company-idiosyncratic effect, unlike A1-A4 —
+  see `scoring.SECTOR_DEMEANED_CONTRIBUTORS`.
+- **Composite-level effect, measured honestly:** the standalone event-level
+  IC above does not translate into a visible change in the full
+  composite's own non-overlapping-window IC (-0.008 without A8 vs. -0.009
+  with, on the same 6 windows) — expected, not a contradiction: A8 is
+  active for only a minority of the universe on any given day, diluted
+  across 7 equal-weighted signals scored for the whole universe. The
+  event-level test remains the right lens for judging A8 itself; the
+  composite-level number is the right lens for judging the tool as a
+  whole, and the two answer different questions.
+
 ---
 
 ## Bucket B — Regime Gates (INCLUDE, market-level, not per-stock)
@@ -280,13 +322,11 @@ too noisy and low-frequency to score on reliably.
 
 Worth pulling forward from v2 **if** data access is workable:
 
-### F1. Post-Earnings Announcement Drift (PEAD) ★ strongest candidate
-One of the most robust anomalies in the literature, and its horizon (drift
-over weeks following an earnings surprise) maps *exactly* onto a swing-trade
-holding period. The current scope defers all fundamentals to v2, but PEAD is
-not generic fundamental analysis — it is a timing signal that happens to need
-earnings data. **Recommend reconsidering for MVP** if an earnings-surprise
-feed is obtainable; the constraint is data sourcing in India, not merit.
+### F1. Post-Earnings Announcement Drift (PEAD) — **built, see A8**
+Promoted out of this bucket Sep 2026: a real earnings-surprise feed was
+confirmed obtainable (`yfinance`), tested for signal before building, and
+added as A8 in Bucket A. See A8's own entry for the full rationale, the
+measured evidence, and the one unresolved risk (estimate-field provenance).
 
 ### F2. Bulk & block deals
 Free from NSE, genuine institutional-footprint signal. Moderate parsing work.
@@ -377,8 +417,9 @@ better separated by role, with redundancy removed and a regime gate added.
 1. **[OPEN]** Accept dropping RSI and MACD? They are the two most familiar
    indicators here, so this is the change most worth pushing back on if you
    disagree — but the case against both is redundancy, not obscurity.
-2. **[OPEN]** Pull PEAD (F1) into MVP, or hold for v2? Depends on whether an
-   earnings-surprise data source is reachable for free.
+2. **RESOLVED (Sep 2026):** Pulled PEAD into MVP as A8. A free earnings-
+   surprise source was found (`yfinance`, already a dependency) and tested
+   for signal before building — see A8's entry in Bucket A.
 3. **[OPEN]** Weighting approach: equal-weight z-scores across uncorrelated
    signal families (robust default, hard to overfit) vs. hand-tuned weights
    vs. backtest-fitted weights. **Recommendation: equal-weight to start** —

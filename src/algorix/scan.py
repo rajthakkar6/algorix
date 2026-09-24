@@ -17,7 +17,7 @@ from datetime import date, datetime
 from algorix.calendar import IST, TradingCalendar
 from algorix.cross_sectional import compute_universe_momentum
 from algorix.exceptions import AlgorixError
-from algorix.indicators import DELIVERY_BASELINE
+from algorix.indicators import DELIVERY_BASELINE, PEAD_WINDOW_SESSIONS
 from algorix.journal import Journal
 from algorix.metals import metal_snapshot
 from algorix.models import Exchange
@@ -33,7 +33,12 @@ from algorix.regime import (
 )
 from algorix.scoring import ScoredUniverse, score_universe
 from algorix.series import load_series
-from algorix.storage import DeliveryRepository, Database, InstrumentRepository
+from algorix.storage import (
+    DeliveryRepository,
+    Database,
+    EarningsSurpriseRepository,
+    InstrumentRepository,
+)
 from algorix.universe import NIFTY_50, ConstituencyRepository
 
 #: Sessions of history loaded per instrument. The 12-month momentum window
@@ -94,6 +99,7 @@ def run_scan(
     seed_regime_instruments(db)
     instrument_repo = InstrumentRepository(db)
     delivery_repo = DeliveryRepository(db)
+    earnings_repo = EarningsSurpriseRepository(db)
 
     # -- load the universe -------------------------------------------------
     symbols = ConstituencyRepository(db).current_constituents(
@@ -102,6 +108,7 @@ def run_scan(
     series_by_symbol = {}
     delivery_by_symbol = {}
     industry_by_symbol = {}
+    earnings_by_symbol = {}
 
     for symbol in symbols:
         instrument = instrument_repo.get(symbol, Exchange.NSE)
@@ -115,6 +122,10 @@ def run_scan(
             instrument.id, delivery_start, as_of
         )
         industry_by_symbol[symbol] = instrument.industry
+        earnings_start = calendar.trading_days_ago(as_of, PEAD_WINDOW_SESSIONS)
+        earnings_by_symbol[symbol] = earnings_repo.get_range(
+            instrument.id, earnings_start, as_of
+        )
 
     if not series_by_symbol:
         errors.append(
@@ -139,6 +150,7 @@ def run_scan(
         calendar=calendar,
         universe_label=index_symbol,
         industry_by_symbol=industry_by_symbol,
+        earnings_by_symbol=earnings_by_symbol,
     )
 
     # -- regime ------------------------------------------------------------
