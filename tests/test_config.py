@@ -1,5 +1,6 @@
 """Tests for runtime configuration loading and validation."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -150,3 +151,49 @@ def test_ensure_data_dir_reports_unwritable_location(tmp_path):
 
     with pytest.raises(ConfigError, match="Cannot create data directory"):
         config.ensure_data_dir()
+
+
+# --------------------------------------------------------------------------
+# load_dotenv_if_present
+# --------------------------------------------------------------------------
+
+
+def test_load_dotenv_reads_a_real_env_file(tmp_path, monkeypatch):
+    """Passes an explicit `dotenv_path` deliberately -- `load_dotenv`'s
+    default search walks up from config.py's own location on disk, not
+    from the process cwd, so `monkeypatch.chdir` alone cannot isolate this
+    test from a real `.env` that happens to sit above the repo."""
+    from algorix.config import load_dotenv_if_present
+
+    monkeypatch.delenv("ALGORIX_TEST_DOTENV_VALUE", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text("ALGORIX_TEST_DOTENV_VALUE=hello\n")
+
+    load_dotenv_if_present(dotenv_path=env_file)
+
+    try:
+        assert os.environ.get("ALGORIX_TEST_DOTENV_VALUE") == "hello"
+    finally:
+        monkeypatch.delenv("ALGORIX_TEST_DOTENV_VALUE", raising=False)
+
+
+def test_load_dotenv_does_not_override_an_already_set_value(tmp_path, monkeypatch):
+    """A value deliberately exported in the real environment must win over
+    whatever a stray .env file also happens to set."""
+    from algorix.config import load_dotenv_if_present
+
+    monkeypatch.setenv("ALGORIX_TEST_DOTENV_VALUE", "from-real-env")
+    env_file = tmp_path / ".env"
+    env_file.write_text("ALGORIX_TEST_DOTENV_VALUE=from-dotenv\n")
+
+    load_dotenv_if_present(dotenv_path=env_file)
+
+    assert os.environ.get("ALGORIX_TEST_DOTENV_VALUE") == "from-real-env"
+
+
+def test_load_dotenv_with_no_file_is_a_noop(tmp_path):
+    from algorix.config import load_dotenv_if_present
+
+    # A path that does not exist -- must not raise, and must not touch
+    # unrelated environment state.
+    load_dotenv_if_present(dotenv_path=tmp_path / "does-not-exist.env")

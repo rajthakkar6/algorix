@@ -360,6 +360,10 @@ def main(argv: list[str] | None = None) -> int:
 
     import uvicorn
 
+    from algorix.config import load_dotenv_if_present
+
+    load_dotenv_if_present()
+
     parser = argparse.ArgumentParser(description="Serve the Algorix web UI.")
     parser.add_argument("--db", help="database path (overrides config)")
     parser.add_argument("--index", default=NIFTY_50, help="index to display")

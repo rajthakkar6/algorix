@@ -23,6 +23,34 @@ DEFAULT_DATA_DIR = Path.home() / ".algorix"
 DEFAULT_DB_FILENAME = "algorix.db"
 
 
+def load_dotenv_if_present(dotenv_path: str | Path | None = None) -> None:
+    """Load a `.env` file into the process environment, if one exists. A
+    no-op otherwise -- this must never be the reason the tool fails to run
+    with no setup.
+
+    Called once, explicitly, at the top of each CLI `main()` -- not at
+    import time. Importing this module happens during test collection too,
+    and a real `.env` sitting on a developer's machine must never leak
+    secrets into `os.environ` for a test that reads it directly without
+    overriding (see sentiment.py's ANTHROPIC_API_KEY check). A CLI
+    invocation is a deliberate run of the tool; an import is not.
+
+    `dotenv_path=None` (every real call site) hands resolution to
+    `python-dotenv` itself, which walks up from *this file's own location
+    on disk* -- not `os.getcwd()` -- so the project's `.env` is found
+    however the CLI is invoked. That also means `monkeypatch.chdir` cannot
+    isolate a test from a real `.env`: pass an explicit `dotenv_path`
+    instead (tests do).
+
+    Values already set in the real environment win -- `load_dotenv`'s
+    default is to not override an existing variable, which is the right
+    precedence for a machine where a value was deliberately exported.
+    """
+    from dotenv import load_dotenv
+
+    load_dotenv(dotenv_path=dotenv_path)
+
+
 @dataclass(frozen=True)
 class Config:
     """Immutable runtime configuration."""

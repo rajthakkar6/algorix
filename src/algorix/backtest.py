@@ -506,7 +506,9 @@ def main(argv: list[str] | None = None) -> int:
     import argparse
     from datetime import datetime
 
-    from algorix.config import Config
+    from algorix.config import Config, load_dotenv_if_present
+
+    load_dotenv_if_present()
 
     parser = argparse.ArgumentParser(
         description="Replay scoring over past sessions and evaluate it."

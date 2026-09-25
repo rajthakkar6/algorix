@@ -246,7 +246,9 @@ def main(argv: list[str] | None = None) -> int:
     """CLI entry point: ``python -m algorix.scan``."""
     import argparse
 
-    from algorix.config import Config
+    from algorix.config import Config, load_dotenv_if_present
+
+    load_dotenv_if_present()
 
     parser = argparse.ArgumentParser(description="Run the Algorix morning scan.")
     parser.add_argument("--db", help="database path (overrides config)")

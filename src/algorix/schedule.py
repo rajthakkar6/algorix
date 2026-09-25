@@ -113,6 +113,10 @@ def write_crontab(content: str) -> None:
 def main(argv: list[str] | None = None) -> int:
     import argparse
 
+    from algorix.config import load_dotenv_if_present
+
+    load_dotenv_if_present()
+
     parser = argparse.ArgumentParser(
         description="Schedule the Algorix morning scan."
     )

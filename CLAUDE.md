@@ -17,6 +17,12 @@ Telegram delivery needs `ALGORIX_TELEGRAM_TOKEN` and
 `ALGORIX_TELEGRAM_CHAT_ID` in the environment. Without them the scan still
 runs, journals, and reports delivery as unconfigured.
 
+**A `.env` file at the repo root is picked up automatically** (every CLI
+`main()` calls `config.load_dotenv_if_present()` first) -- credentials do
+not need to be exported by hand every session. `.env` is gitignored; a
+value already exported in the real environment always wins over one in the
+file.
+
 `refresh` now also ingests corporate announcements (G1) and drives G4
 sentiment extraction every run: it collects any batch submitted by an
 earlier run that has finished, then submits whatever is newly unextracted.
