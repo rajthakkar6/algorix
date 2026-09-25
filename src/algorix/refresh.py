@@ -50,9 +50,10 @@ from algorix.models import CalendarPolicy, Exchange, Instrument, InstrumentType
 from algorix.regime import REGIME_INSTRUMENTS, seed_regime_instruments
 from algorix.sentiment import (
     DEFAULT_BATCH_LIMIT,
-    AnthropicExtractor,
     CollectionReport,
+    Extractor,
     SubmissionReport,
+    build_extractor,
     collect_extraction_results,
     submit_extraction_batch,
 )
@@ -248,7 +249,7 @@ def refresh(
     index_client: NseIndexClient | None = None,
     bhavcopy_client: NseBhavcopyClient | None = None,
     announcements_client: NseAnnouncementsClient | None = None,
-    extractor: AnthropicExtractor | None = None,
+    extractor: Extractor | None = None,
     earnings_client: YFinanceEarningsClient | None = None,
 ) -> RefreshReport:
     """Bring the database up to date through the last completed session.
@@ -434,8 +435,18 @@ def refresh(
     sentiment_submission: SubmissionReport | None = None
 
     if not skip_sentiment:
-        sentiment_extractor = extractor or AnthropicExtractor()
-        for pending_batch in ExtractionBatchRepository(db).pending():
+        try:
+            sentiment_extractor = extractor or build_extractor()
+        except AlgorixError as exc:
+            # A misconfigured ALGORIX_LLM_PROVIDER must not abort bars/
+            # delivery/announcements/earnings, which have already
+            # succeeded by this point in the run -- report it and skip
+            # the sentiment step for this run, the same as any other
+            # single-feed failure.
+            errors.append(f"sentiment: {type(exc).__name__}: {exc}")
+            sentiment_extractor = None
+
+        for pending_batch in [] if sentiment_extractor is None else ExtractionBatchRepository(db).pending():
             try:
                 result = collect_extraction_results(
                     db, pending_batch.batch_id, extractor=sentiment_extractor,
@@ -446,17 +457,24 @@ def refresh(
                     f"{type(exc).__name__}: {exc}"
                 )
                 continue
-            if result.ready:
+            if result.batch_failed:
+                # Terminal failure (a provider-specific state -- e.g.
+                # OpenAI's failed/expired/cancelled) is not "still
+                # processing"; it must be visible, not silently absorbed
+                # into a zero-stored, unremarked collection result.
+                errors.append(f"sentiment batch {pending_batch.batch_id}: {result.reason}")
+            elif result.ready:
                 sentiment_collected.append(result)
             # `ready=False` (still processing, or unconfigured) is not an
             # error -- the batch simply stays pending for the next run.
 
-        try:
-            sentiment_submission = submit_extraction_batch(
-                db, limit=sentiment_batch_limit, extractor=sentiment_extractor,
-            )
-        except AlgorixError as exc:
-            errors.append(f"sentiment submit: {type(exc).__name__}: {exc}")
+        if sentiment_extractor is not None:
+            try:
+                sentiment_submission = submit_extraction_batch(
+                    db, limit=sentiment_batch_limit, extractor=sentiment_extractor,
+                )
+            except AlgorixError as exc:
+                errors.append(f"sentiment submit: {type(exc).__name__}: {exc}")
 
     return RefreshReport(
         session_date=target,

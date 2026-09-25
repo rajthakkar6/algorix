@@ -292,6 +292,19 @@ Because conclusions get logged and compared over months:
 | Bulk news/sentiment extraction | Claude Haiku 4.5 or Sonnet 5 | High-volume classification/extraction; cheap per item |
 | The concluder itself | **Claude Opus 5** (`claude-opus-5`) | Low volume (one per candidate), high stakes, needs genuine synthesis across conflicting evidence |
 
+**Revised (Sep 2026): bulk extraction is provider-configurable, not
+Claude-only.** Built with Claude Sonnet 5 first (this table's original
+choice); the user then asked for provider flexibility to avoid lock-in.
+`ALGORIX_LLM_PROVIDER=anthropic|openai` picks the active one (default
+`anthropic`), one at a time -- not a fallback chain. gpt-4o-mini was
+verified as the OpenAI default: cheaper per token than either Anthropic
+option at batch rates, with equivalent structured-output support (checked
+against OpenAI's current docs and SDK, not assumed). See CLAUDE.md and
+`sentiment.py`. The concluder (unbuilt) is not addressed by this —
+whether it should also become provider-configurable, or stay Opus-5-only
+given the higher stakes of that specific job, is an open question of its
+own if/when §3.7 gets built.
+
 Use **adaptive thinking** (`thinking: {type: "adaptive"}`) on the concluder —
 weighing conflicting quantitative and qualitative evidence is exactly the
 case for it.

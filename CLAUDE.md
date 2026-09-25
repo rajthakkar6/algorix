@@ -26,11 +26,21 @@ file.
 `refresh` now also ingests corporate announcements (G1) and drives G4
 sentiment extraction every run: it collects any batch submitted by an
 earlier run that has finished, then submits whatever is newly unextracted.
-G4 needs `ANTHROPIC_API_KEY` (the SDK's own standard env var, not an
-`ALGORIX_`-prefixed one) in the environment -- without it, `refresh` still
-completes normally and reports the sentiment step as unconfigured, same
-shape as an unconfigured Telegram digest. `--skip-announcements` and
-`--skip-sentiment` disable each independently.
+`--skip-announcements` and `--skip-sentiment` disable each independently.
+
+**G4 supports multiple LLM providers, one active at a time** (Sep 2026,
+to avoid lock-in -- not a fallback chain, not a compare-both harness).
+`ALGORIX_LLM_PROVIDER` picks `anthropic` (default, needs
+`ANTHROPIC_API_KEY`, the SDK's own standard env var) or `openai` (needs
+`OPENAI_API_KEY`). `ALGORIX_LLM_MODEL` overrides that provider's default
+model. Without credentials for whichever provider is active, `refresh`
+still completes normally and reports the sentiment step as unconfigured,
+same shape as an unconfigured Telegram digest; an unrecognised
+`ALGORIX_LLM_PROVIDER` value is reported as an error but does not abort
+the rest of the run (bars/delivery/announcements/earnings already
+succeeded by that point). See `sentiment.Extractor` for the protocol a
+third provider would need to implement, and `sentiment.build_extractor`
+for the selection logic.
 
 Module map: `calendar` → `storage` → `universe`/`ingestion`/`delivery`/
 `metals`/`announcements`/`earnings` → `refresh` (data layer); `series` →

@@ -23,7 +23,7 @@ from algorix.models import (
     Polarity,
 )
 from algorix.sentiment import (
-    DEFAULT_MODEL_ID,
+    DEFAULT_ANTHROPIC_MODEL_ID,
     PROMPT_VERSION,
     BatchItemResult,
     EventExtraction,
@@ -107,7 +107,7 @@ class FakeExtractor:
 
     def __init__(self, not_configured: bool = False):
         self.not_configured = not_configured
-        self.model_id = DEFAULT_MODEL_ID
+        self.model_id = DEFAULT_ANTHROPIC_MODEL_ID
         self.submitted: list[list[tuple[str, str]]] = []
         self.results_by_batch: dict[str, list[BatchItemResult]] = {}
         self.status_by_batch: dict[str, str] = {}
@@ -195,7 +195,7 @@ def test_submit_excludes_already_extracted(db, reliance_id):
                 announcement_seq_id="1", event_type=EventType.OTHER, entities=[],
                 polarity=Polarity.NEUTRAL, materiality=Materiality.LOW,
                 source_credibility="official", risk_flag=False, risk_reason=None,
-                model_id=DEFAULT_MODEL_ID, prompt_version=PROMPT_VERSION,
+                model_id=DEFAULT_ANTHROPIC_MODEL_ID, prompt_version=PROMPT_VERSION,
                 extracted_at=NOW,
             )
         ]
@@ -259,7 +259,7 @@ def test_collect_stores_successful_extractions(db, reliance_id):
     stored = EventExtractionRepository(db).get("1")
     assert stored is not None
     assert stored.event_type == EventType.BUSINESS_UPDATE
-    assert stored.model_id == DEFAULT_MODEL_ID
+    assert stored.model_id == DEFAULT_ANTHROPIC_MODEL_ID
     assert stored.prompt_version == PROMPT_VERSION
 
 
@@ -268,7 +268,7 @@ def test_collect_marks_the_batch_collected(db, reliance_id):
     ExtractionBatchRepository(db).record_submission(
         ExtractionBatch(
             batch_id="batch_1", submitted_at=NOW, item_count=1,
-            model_id=DEFAULT_MODEL_ID, prompt_version=PROMPT_VERSION,
+            model_id=DEFAULT_ANTHROPIC_MODEL_ID, prompt_version=PROMPT_VERSION,
             status="submitted",
         )
     )
@@ -351,7 +351,7 @@ def test_collect_a_still_processing_batch_stays_pending(db):
     ExtractionBatchRepository(db).record_submission(
         ExtractionBatch(
             batch_id="batch_1", submitted_at=NOW, item_count=1,
-            model_id=DEFAULT_MODEL_ID, prompt_version=PROMPT_VERSION,
+            model_id=DEFAULT_ANTHROPIC_MODEL_ID, prompt_version=PROMPT_VERSION,
             status="submitted",
         )
     )
@@ -487,3 +487,302 @@ def test_extractor_raises_not_configured_without_api_key(monkeypatch):
 
     with pytest.raises(NotConfiguredError, match="ANTHROPIC_API_KEY"):
         extractor.submit_batch([("1", "some text")])
+
+
+# ---------------------------------------------------------------------------
+# OpenAIExtractor -- negative (credential resolution)
+# ---------------------------------------------------------------------------
+
+
+def test_openai_extractor_raises_not_configured_without_api_key(monkeypatch):
+    from algorix.sentiment import OpenAIExtractor
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    extractor = OpenAIExtractor()
+
+    with pytest.raises(NotConfiguredError, match="OPENAI_API_KEY"):
+        extractor.submit_batch([("1", "some text")])
+
+
+# ---------------------------------------------------------------------------
+# OpenAI request-line construction (pure, no API key needed)
+# ---------------------------------------------------------------------------
+
+
+def test_openai_request_line_shape():
+    from algorix.sentiment import _openai_request_line
+
+    line = json.loads(_openai_request_line("1", "hello", "gpt-4o-mini"))
+
+    assert line["custom_id"] == "1"
+    assert line["method"] == "POST"
+    assert line["url"] == "/v1/chat/completions"
+    assert line["body"]["model"] == "gpt-4o-mini"
+
+
+def test_openai_request_line_carries_the_user_message():
+    from algorix.sentiment import _openai_request_line
+
+    line = json.loads(_openai_request_line("1", "the announcement text", "gpt-4o-mini"))
+
+    messages = line["body"]["messages"]
+    assert messages[0]["role"] == "system"
+    assert messages[1] == {"role": "user", "content": "the announcement text"}
+
+
+def test_openai_request_line_uses_strict_json_schema():
+    from algorix.sentiment import _openai_request_line, _response_schema
+
+    line = json.loads(_openai_request_line("1", "x", "gpt-4o-mini"))
+
+    fmt = line["body"]["response_format"]
+    assert fmt["type"] == "json_schema"
+    assert fmt["json_schema"]["strict"] is True
+    assert fmt["json_schema"]["schema"] == _response_schema()
+
+
+def test_openai_request_line_is_valid_json_per_line():
+    """The JSONL file itself is built by joining these with newlines --
+    each line must independently parse, which a stray unescaped newline
+    inside a field would break."""
+    from algorix.sentiment import _openai_request_line
+
+    multiline_text = "line one\nline two\nline three"
+    line = _openai_request_line("1", multiline_text, "gpt-4o-mini")
+
+    assert "\n" not in line  # the JSON string itself has no raw newlines
+    parsed = json.loads(line)
+    assert multiline_text in parsed["body"]["messages"][1]["content"]
+
+
+# ---------------------------------------------------------------------------
+# OpenAI status normalization (pure, no API key needed)
+# ---------------------------------------------------------------------------
+
+
+def test_openai_status_completed_maps_to_ended():
+    from algorix.sentiment import BATCH_STATUS_ENDED, _openai_normalize_status
+
+    assert _openai_normalize_status("completed") == BATCH_STATUS_ENDED
+
+
+@pytest.mark.parametrize("raw", ["failed", "expired", "cancelled"])
+def test_openai_terminal_failure_statuses_map_to_failed(raw):
+    from algorix.sentiment import BATCH_STATUS_FAILED, _openai_normalize_status
+
+    assert _openai_normalize_status(raw) == BATCH_STATUS_FAILED
+
+
+@pytest.mark.parametrize("raw", ["validating", "in_progress", "finalizing", "cancelling"])
+def test_openai_in_flight_statuses_map_to_pending(raw):
+    from algorix.sentiment import BATCH_STATUS_PENDING, _openai_normalize_status
+
+    assert _openai_normalize_status(raw) == BATCH_STATUS_PENDING
+
+
+# ---------------------------------------------------------------------------
+# OpenAI result-line parsing (pure, no API key needed)
+# ---------------------------------------------------------------------------
+
+
+def test_openai_result_line_parses_a_success():
+    from algorix.sentiment import _parse_openai_result_line
+
+    line = json.dumps({
+        "id": "batch_req_1", "custom_id": "1",
+        "response": {
+            "status_code": 200,
+            "body": {"choices": [{"message": {"content": payload()}}]},
+        },
+        "error": None,
+    })
+
+    result = _parse_openai_result_line(line)
+
+    assert result.custom_id == "1"
+    assert result.outcome == "succeeded"
+    assert result.text == payload()
+
+
+def test_openai_result_line_parses_a_per_item_error():
+    """The real shape verified against OpenAI's docs: response is null and
+    error is populated for a request-level failure."""
+    from algorix.sentiment import _parse_openai_result_line
+
+    line = json.dumps({
+        "id": "batch_req_1", "custom_id": "1", "response": None,
+        "error": {"code": "batch_expired", "message": "expired before completion"},
+    })
+
+    result = _parse_openai_result_line(line)
+
+    assert result.outcome == "errored"
+    assert result.error == "expired before completion"
+
+
+def test_openai_result_line_handles_non_200_status_code():
+    from algorix.sentiment import _parse_openai_result_line
+
+    line = json.dumps({
+        "custom_id": "1",
+        "response": {"status_code": 429, "body": {}},
+        "error": None,
+    })
+
+    result = _parse_openai_result_line(line)
+
+    assert result.outcome == "errored"
+    assert "429" in result.error
+
+
+def test_openai_result_line_handles_empty_choices():
+    from algorix.sentiment import _parse_openai_result_line
+
+    line = json.dumps({
+        "custom_id": "1",
+        "response": {"status_code": 200, "body": {"choices": []}},
+        "error": None,
+    })
+
+    result = _parse_openai_result_line(line)
+
+    assert result.outcome == "errored"
+    assert "empty" in result.error.lower()
+
+
+# ---------------------------------------------------------------------------
+# build_extractor -- provider selection
+# ---------------------------------------------------------------------------
+
+
+def test_build_extractor_defaults_to_anthropic(monkeypatch):
+    from algorix.sentiment import AnthropicExtractor, DEFAULT_ANTHROPIC_MODEL_ID, build_extractor
+
+    monkeypatch.delenv("ALGORIX_LLM_PROVIDER", raising=False)
+
+    extractor = build_extractor()
+
+    assert isinstance(extractor, AnthropicExtractor)
+    assert extractor.model_id == DEFAULT_ANTHROPIC_MODEL_ID
+
+
+def test_build_extractor_explicit_openai():
+    from algorix.sentiment import DEFAULT_OPENAI_MODEL_ID, OpenAIExtractor, build_extractor
+
+    extractor = build_extractor(provider="openai")
+
+    assert isinstance(extractor, OpenAIExtractor)
+    assert extractor.model_id == DEFAULT_OPENAI_MODEL_ID
+
+
+def test_build_extractor_reads_provider_from_env(monkeypatch):
+    from algorix.sentiment import OpenAIExtractor, build_extractor
+
+    monkeypatch.setenv("ALGORIX_LLM_PROVIDER", "openai")
+
+    assert isinstance(build_extractor(), OpenAIExtractor)
+
+
+def test_build_extractor_explicit_arg_overrides_env(monkeypatch):
+    """A caller-supplied provider must win over ALGORIX_LLM_PROVIDER --
+    avoiding lock-in means being able to choose per call, not just once
+    per machine."""
+    from algorix.sentiment import AnthropicExtractor, build_extractor
+
+    monkeypatch.setenv("ALGORIX_LLM_PROVIDER", "openai")
+
+    assert isinstance(build_extractor(provider="anthropic"), AnthropicExtractor)
+
+
+def test_build_extractor_is_case_insensitive():
+    from algorix.sentiment import OpenAIExtractor, build_extractor
+
+    assert isinstance(build_extractor(provider="OpenAI"), OpenAIExtractor)
+
+
+def test_build_extractor_model_override():
+    from algorix.sentiment import build_extractor
+
+    extractor = build_extractor(provider="openai", model_id="gpt-4o")
+
+    assert extractor.model_id == "gpt-4o"
+
+
+def test_build_extractor_model_from_env(monkeypatch):
+    from algorix.sentiment import build_extractor
+
+    monkeypatch.setenv("ALGORIX_LLM_MODEL", "gpt-4o")
+
+    extractor = build_extractor(provider="openai")
+
+    assert extractor.model_id == "gpt-4o"
+
+
+def test_build_extractor_unknown_provider_raises_config_error():
+    from algorix.exceptions import ConfigError
+    from algorix.sentiment import build_extractor
+
+    with pytest.raises(ConfigError, match="mistral"):
+        build_extractor(provider="mistral")
+
+
+def test_build_extractor_unknown_provider_from_env_raises(monkeypatch):
+    from algorix.exceptions import ConfigError
+    from algorix.sentiment import build_extractor
+
+    monkeypatch.setenv("ALGORIX_LLM_PROVIDER", "not-a-real-provider")
+
+    with pytest.raises(ConfigError):
+        build_extractor()
+
+
+def test_submit_extraction_batch_uses_openai_when_configured(db, reliance_id, monkeypatch):
+    """Without an injected extractor, submit_extraction_batch must respect
+    an explicit provider choice, not silently default to Anthropic."""
+    seed_announcements(db, reliance_id, ["1"])
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    report = submit_extraction_batch(db, now=NOW, provider="openai")
+
+    assert report.submitted is False
+    assert "OPENAI_API_KEY" in report.reason
+
+
+# ---------------------------------------------------------------------------
+# collect_extraction_results -- terminal batch failure (distinct from
+# still-processing)
+# ---------------------------------------------------------------------------
+
+
+def test_collect_reports_a_terminal_batch_failure(db, reliance_id):
+    """A batch that will never produce results (OpenAI: failed/expired/
+    cancelled) must be reported distinctly from 'still processing' and
+    must not be left pending forever."""
+    seed_announcements(db, reliance_id, ["1"])
+    extractor = FakeExtractor()
+    extractor.status_by_batch["batch_1"] = "failed"
+
+    report = collect_extraction_results(db, "batch_1", now=NOW, extractor=extractor)
+
+    assert report.ready is True
+    assert report.batch_failed is True
+    assert report.stored == 0
+    assert report.reason is not None
+
+
+def test_collect_marks_a_terminally_failed_batch_collected(db, reliance_id):
+    seed_announcements(db, reliance_id, ["1"])
+    ExtractionBatchRepository(db).record_submission(
+        ExtractionBatch(
+            batch_id="batch_1", submitted_at=NOW, item_count=1,
+            model_id=DEFAULT_ANTHROPIC_MODEL_ID, prompt_version=PROMPT_VERSION,
+            status="submitted",
+        )
+    )
+    extractor = FakeExtractor()
+    extractor.status_by_batch["batch_1"] = "failed"
+
+    collect_extraction_results(db, "batch_1", now=NOW, extractor=extractor)
+
+    # Must not stay in the pending queue forever -- it will never finish.
+    assert ExtractionBatchRepository(db).pending() == []

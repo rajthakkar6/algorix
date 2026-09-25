@@ -923,3 +923,53 @@ def test_refresh_re_ingests_earnings_idempotently(db, cal):
         reliance.id, date(2000, 1, 1), date(2026, 12, 31)
     )
     assert len(stored) == 1
+
+
+# --------------------------------------------------------------------------
+# Sentiment provider misconfiguration is a collected failure, not a crash
+# --------------------------------------------------------------------------
+
+
+def test_bad_llm_provider_does_not_abort_the_whole_refresh(db, cal, monkeypatch):
+    """ALGORIX_LLM_PROVIDER is read when refresh() builds its own default
+    extractor -- a typo there must not lose bars/delivery/announcements/
+    earnings, which have already succeeded by the time sentiment runs."""
+    monkeypatch.setenv("ALGORIX_LLM_PROVIDER", "not-a-real-provider")
+
+    report = run(db, cal, skip_sentiment=False, extractor=None)
+
+    assert report.bars_stored > 0
+    assert any("sentiment" in e for e in report.errors)
+    assert report.sentiment_submission is None
+
+
+def test_valid_llm_provider_env_var_is_respected(db, cal, monkeypatch):
+    """Confirms the env var actually reaches build_extractor() inside
+    refresh() when no extractor is injected -- not just that a bad value
+    is caught."""
+    monkeypatch.setenv("ALGORIX_LLM_PROVIDER", "openai")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    from algorix.models import AnnouncementRecord
+
+    ann_client = FakeAnnouncementsClient(
+        records_by_symbol={
+            "RELIANCE": [
+                AnnouncementRecord(
+                    seq_id="1", symbol="RELIANCE",
+                    announced_at=datetime(2026, 9, 17, 10, 0),
+                    category="Updates", text="a real disclosure",
+                )
+            ],
+        }
+    )
+
+    report = run(db, cal, skip_sentiment=False, announcements_client=ann_client, extractor=None)
+
+    # No fake injected -- this exercises the real OpenAIExtractor's
+    # credential check, which must degrade cleanly like every other
+    # unconfigured-credential path in this codebase.
+    assert report.sentiment_submission is not None
+    assert report.sentiment_submission.submitted is False
+    assert "OPENAI_API_KEY" in report.sentiment_submission.reason
+    assert report.bars_stored > 0
