@@ -25,7 +25,7 @@ import json
 import sqlite3
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -34,6 +34,7 @@ from algorix.models import (
     AnnouncementRecord,
     Bar,
     CalendarPolicy,
+    ChartDrawing,
     DeliveryRecord,
     EarningsSurpriseRecord,
     EventType,
@@ -233,6 +234,29 @@ CREATE TABLE IF NOT EXISTS earnings_surprises (
 );
 """
 
+# User-placed chart annotations (trendlines, and manually-placed
+# breakout/dip markers) on the web UI's stock detail page -- see
+# ChartDrawing in models.py. `points` is deliberately opaque JSON: its
+# count and meaning depend on `tool_type`, which this table does not
+# constrain to an enum (no CHECK(tool_type IN (...))) -- that would force a
+# migration every time a new drawing tool ships, exactly what this design
+# exists to avoid. The known-type allow-list lives in web/server.py
+# instead, where adding one is a single dict entry. System-auto-detected
+# breakout/dip highlights are NOT rows here -- they are computed fresh on
+# every page load and never stored.
+_SCHEMA_V9 = """
+CREATE TABLE IF NOT EXISTS chart_drawings (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    instrument_id  INTEGER NOT NULL REFERENCES instruments(id) ON DELETE CASCADE,
+    tool_type      TEXT    NOT NULL CHECK (tool_type <> ''),
+    points         TEXT    NOT NULL CHECK (json_valid(points)),
+    created_at     TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_chart_drawings_instrument
+    ON chart_drawings (instrument_id);
+"""
+
 #: Ordered migrations. Each runs once, in version order, against databases
 #: older than it. Never edit a migration that has shipped -- add a new one.
 _MIGRATIONS: list[tuple[int, str]] = [
@@ -244,6 +268,7 @@ _MIGRATIONS: list[tuple[int, str]] = [
     (6, _SCHEMA_V6),
     (7, _SCHEMA_V7),
     (8, _SCHEMA_V8),
+    (9, _SCHEMA_V9),
 ]
 
 SCHEMA_VERSION = _MIGRATIONS[-1][0]
@@ -1066,6 +1091,81 @@ class EarningsSurpriseRepository:
             )
             for r in rows
         ]
+
+
+class ChartDrawingRepository:
+    """Read/write access to user-placed chart annotations (see ChartDrawing
+    in models.py). UI-only -- never read by scoring.py, scan.py, or the
+    journal.
+    """
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    def create(self, drawing: ChartDrawing) -> ChartDrawing:
+        """Insert one drawing. Returns it with `id`/`created_at` filled in.
+
+        Unlike InstrumentRepository.upsert, a drawing has no natural key to
+        re-select by afterward -- it's identified only by its own
+        autoincrement id -- so cursor.lastrowid is used directly rather than
+        a follow-up SELECT.
+        """
+        created_at = _utc_now_iso()
+        with self.db.connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO chart_drawings
+                    (instrument_id, tool_type, points, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    drawing.instrument_id,
+                    drawing.tool_type,
+                    json.dumps(drawing.points),
+                    created_at,
+                ),
+            )
+            new_id = int(cursor.lastrowid)
+        return replace(
+            drawing, id=new_id, created_at=datetime.fromisoformat(created_at)
+        )
+
+    def list_for(self, instrument_id: int) -> list[ChartDrawing]:
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM chart_drawings WHERE instrument_id = ? "
+                "ORDER BY created_at",
+                (instrument_id,),
+            ).fetchall()
+        return [_row_to_chart_drawing(r) for r in rows]
+
+    def delete(self, drawing_id: int, instrument_id: int) -> bool:
+        """Delete one drawing, scoped to its instrument. Returns True if a
+        row changed -- the rowcount idiom from
+        InstrumentRepository.deactivate(), the only delete-by-id precedent
+        in this file before this one.
+
+        `instrument_id` is required, not optional: a delete request for a
+        real drawing id under the wrong symbol must not delete it -- this
+        makes cross-instrument deletion structurally impossible, not just
+        checked for.
+        """
+        with self.db.connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM chart_drawings WHERE id = ? AND instrument_id = ?",
+                (drawing_id, instrument_id),
+            )
+            return cursor.rowcount > 0
+
+
+def _row_to_chart_drawing(row: sqlite3.Row) -> ChartDrawing:
+    return ChartDrawing(
+        id=row["id"],
+        instrument_id=row["instrument_id"],
+        tool_type=row["tool_type"],
+        points=json.loads(row["points"]),
+        created_at=datetime.fromisoformat(row["created_at"]),
+    )
 
 
 def _row_to_instrument(row: sqlite3.Row) -> Instrument:

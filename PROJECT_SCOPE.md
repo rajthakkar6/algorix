@@ -11,20 +11,6 @@ Sections marked **[OPEN]** are decisions still needed.
 
 ## 0. Build Status
 
-> **⏸ PAUSED MID-TASK (2026-09-25) — read this first if resuming.**
-> An interactive price chart (§6, "Chart UI / advance tooling") is
-> **partially built and uncommitted** in the working tree right now:
-> `src/algorix/web/server.py` and `src/algorix/web/templates/stock.html`
-> have real, uncommitted changes. Do **not** treat this as done — no
-> tests were written, the app was never actually run to confirm the
-> chart renders, and a small cleanup is still needed (see the TODO in
-> §6.1). Before doing anything else chart-related: run
-> `git diff -- src/algorix/web/` to see exactly what's there, read §6.1
-> below for the full plan and what's left, then finish that task before
-> starting anything new. If the working tree is somehow clean when you
-> read this, the work was finished and committed in a later session --
-> this note is stale, safe to delete.
-
 **The MVP morning scanner is built and working end to end** (485 tests),
 and has now been run against live data: 57 instruments, ~28.5k bars, a
 full 31-session delivery window, and all four regime gates reporting.
@@ -418,7 +404,7 @@ its own task; current gaps are 1–2 sessions per affected instrument.
 Captured here so nothing discussed gets lost, even though most of this is
 v2+.
 
-### 6.1 Chart UI / "advance tooling" phase (started Sep 2026, IN PROGRESS)
+### 6.1 Chart UI / "advance tooling" phase (started Sep 2026)
 
 User asked to move into a "next phase: advance tooling and user
 flexibility," starting with the stock detail page's chart. Two parts:
@@ -436,10 +422,10 @@ principle exists to avoid; EMA crossover is structurally what MACD
 already reduces to). Read INDICATORS.md Bucket E for the full reasoning
 before reconsidering any of the three.
 
-**Part B — interactive chart (IN PROGRESS, uncommitted).** The stock
-detail page's chart was a static, hand-built SVG polyline of closing
-prices only — no OHLC, no volume, no pan/zoom. Replacing it with a real
-candlestick + volume chart, pannable/scrollable/zoomable.
+**Part B — interactive chart (DONE).** The stock detail page's chart was
+a static, hand-built SVG polyline of closing prices only — no OHLC, no
+volume, no pan/zoom. Replaced with a real candlestick + volume chart,
+pannable/scrollable/zoomable.
 
 - **Library chosen:** TradingView's `lightweight-charts` v5.2.0
   (MIT-licensed, ~45KB, loaded via a pinned CDN `<script>` tag --
@@ -462,45 +448,87 @@ candlestick + volume chart, pannable/scrollable/zoomable.
   narrowly not true, scoped to this one chart. Worth a conscious decision
   on whether that's acceptable going forward, not just accepted by
   default because it already happened.
-- **What exists right now, uncommitted:** a new read-only JSON route
-  `GET /stock/{symbol}/bars` in `web/server.py` returning OHLCV for the
-  loaded window (reuses data already loaded for the page, no new
-  ingestion), and `stock.html`'s sparkline block replaced with a
-  `<div id="price-chart">` + inline `<script>` that fetches that route
-  and renders candles + a volume pane, themed from the page's existing
-  light/dark CSS custom properties (`--good`/`--bad`/`--accent`/`--line`/
-  `--muted`) so it matches both themes without extra work.
-- **What is NOT done yet (do this before calling Part B finished):**
-  1. `server.py` still has dead code from the old sparkline
-     (`_sparkline()` function, the `closes` list computation, and the
-     now-unused `"closes"`/`"sparkline"` context keys in `stock_detail`)
-     -- remove them.
-  2. **No tests exist for the new `/stock/{symbol}/bars` route.** Needs
-     positive (known instrument returns correct OHLCV JSON shape) and
-     negative (unknown symbol, no price history stored) cases, per this
-     project's own rule that every task gets both.
-  3. **The app was never actually run and looked at.** No screenshot, no
-     manual check that the chart renders, panning works, or the CDN
-     script loads correctly. Do this before treating any of it as working
-     -- this project's own rule 5 is explicit that nothing gets called
-     done without being run end to end.
-  4. `tests/test_web.py::test_stock_page_draws_a_sparkline` will now fail
-     or needs rewriting -- it asserts on the old SVG polyline output,
-     which no longer exists on the page.
-- **Deliberately not started: drawing tools (trendlines).** The user
-  asked for line-drawing on the chart too. `lightweight-charts` v5 has a
-  plugin/primitives API that supports building custom drawing tools, but
-  this is a separate, larger task with one real open question that needs
-  the user's input before building it: **should a drawn line persist**
-  (saved to a new DB table, visible again on the next page load) or is
-  it session-only (simpler, no schema change, lost on refresh)? Ask
-  before building -- the answer changes the shape of the work
-  significantly (new storage layer + API vs. pure client-side state).
-  Note this is a UI/manual-annotation feature for a human looking at the
-  chart, not a new scoring indicator -- it does not reintroduce
-  chart-pattern recognition as an automated signal, which INDICATORS.md
-  Bucket E already rejects for weak out-of-sample evidence. Keep that
-  distinction explicit if this comes up again.
+- **What exists:** a read-only JSON route `GET /stock/{symbol}/bars` in
+  `web/server.py` returning OHLCV for the loaded window (reuses data
+  already loaded for the page, no new ingestion), and `stock.html`'s
+  sparkline block replaced with a `<div id="price-chart">` + inline
+  `<script>` that fetches that route and renders candles + a volume pane,
+  themed from the page's existing light/dark CSS custom properties
+  (`--good`/`--bad`/`--accent`/`--line`/`--muted`) so it matches both
+  themes without extra work.
+- **Closed out (2026-09-25):** the old sparkline's dead code
+  (`_sparkline()`, the `closes` list, the unused context keys) is
+  removed. `tests/test_web.py` has positive + negative coverage for
+  `/stock/{symbol}/bars` (known instrument, unknown symbol, instrument
+  with no bars stored) and `test_stock_page_draws_a_sparkline` was
+  replaced with `test_stock_page_embeds_the_chart`. Full offline suite
+  passes (649 tests). The app was actually run against the real DB
+  (`~/.algorix/algorix.db`, EICHERMOT) and driven with Playwright, not
+  just curl: candles + volume render in both light and dark theme, the
+  CDN script loads with no console errors, and wheel-zoom + drag-to-pan
+  both work (crosshair and date label confirmed interactively).
+**Part C — chart annotations: trendlines + breakout/dip highlights
+(DONE, 2026-09-26).** The open question from Part B ("should a drawn
+line persist?") was answered: **yes, persisted to the database.**
+Mid-session the user also asked for a second, related feature: the
+system should auto-highlight breakouts/dips on the chart, and the user
+should be able to place the same kind of marker manually.
+
+- **Schema:** new `chart_drawings` table (migration `_SCHEMA_V9`),
+  generic `tool_type` + JSON `points` columns -- adding a future drawing
+  type (horizontal line, rectangle, fib retracement) is a new
+  `tool_type` string and a client-side renderer, never a migration. Only
+  user-placed annotations are rows here (`ChartDrawing` in `models.py`,
+  `ChartDrawingRepository` in `storage.py` -- the first `DELETE FROM` in
+  that file, instrument-scoped so a delete can't cross symbols).
+- **Auto-detected breakout/dip markers are NOT persisted.** They're
+  recomputed every page load in `stock_detail()` from indicators the
+  page already shows (A4 Donchian position >= 95%, or A5 short-term
+  return <= -3% while A3's trend state is an uptrend) -- see
+  `_auto_markers()` in `web/server.py`. UI-only heuristic thresholds,
+  never read by `scoring.py`. Only the latest session is evaluated
+  (these indicators aren't computed per-historical-bar on this page); a
+  full historical breakout/dip series would need rolling recomputation
+  across the whole window, explicitly out of scope here.
+- **The user can also manually place a breakout/dip marker** (1 click)
+  or a trendline (2 clicks) -- both go through the same
+  `POST /stock/{symbol}/drawings` route and persist. `_DRAWING_POINT_COUNTS`
+  in `web/server.py` is the tool-type allow-list (`trendline`: 2,
+  `breakout`: 1, `dip`: 1) -- extending it is one dict entry.
+- **First POST/DELETE routes and first Pydantic request body in this
+  codebase** (`DrawingPoint`/`DrawingCreate`). Convention: an unknown
+  symbol is informational-empty (200 `[]`) for the GET, but a real error
+  (404) for POST/DELETE, since a write against nothing has nothing to
+  attach to.
+- **Client-side:** `web/static/chart-drawings.js` (first static mount in
+  the app) ports TradingView's own official `TrendLine` primitive
+  example for lightweight-charts v5 (re-verified against the upstream
+  source while writing it, not recalled from memory) plus a small
+  `AlgorixDrawingTools` registry (`trendline`/`breakout`/`dip` today).
+  Manual breakout/dip markers use v5's `createSeriesMarkers()`. Trendline
+  selection/delete is a plain DOM list with a delete button, deliberately
+  not canvas click-hit-testing -- simpler to build and far more reliable
+  to test than pixel-precise clicking on a thin line.
+- **Tests:** model validation (`test_models.py`), full repository suite
+  including the cross-instrument-delete negative case
+  (`test_storage.py`), full route suite including unknown-symbol/
+  unknown-id/wrong-instrument-delete/malformed-body cases
+  (`test_web.py`), and direct unit tests for `_auto_markers()` (breakout,
+  dip-within-uptrend, pullback-outside-uptrend is correctly ignored,
+  unavailable indicators, no-trend-state). Full offline suite passes
+  (683 tests).
+- **Verified interactively, not just asserted:** ran the app against the
+  real DB with Playwright -- drew a trendline and a breakout marker,
+  reloaded the page (the actual persistence proof, both still rendered),
+  deleted both, reloaded again (confirmed gone), and confirmed toggling
+  a tool off before placing any point fires no request. Auto-marker
+  rendering (arrow, no delete button since it isn't a stored row) was
+  verified against a throwaway DB copy seeded with a synthetic breakout
+  bar, in both light and dark theme -- the real Nifty 50 data at the
+  time had no symbol past either threshold. The real database was left
+  with its schema migrated (permanent, harmless) but zero
+  `chart_drawings` rows -- every row created during testing was deleted
+  before the session ended.
 
 - **Data ingestion**: fundamentals, news/event NLP, social sentiment,
   options flow, institutional/insider filings, promoter pledge tracking,

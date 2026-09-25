@@ -19,9 +19,11 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
 
 from algorix.backtest import evaluate_signals, run_backtest
 from algorix.calendar import IST, TradingCalendar
@@ -41,7 +43,7 @@ from algorix.indicators import (
 )
 from algorix.journal import Journal
 from algorix.metals import metal_snapshot
-from algorix.models import Exchange
+from algorix.models import ChartDrawing, Exchange
 from algorix.regime import (
     INDIA_VIX,
     NIFTY_INDEX,
@@ -52,6 +54,7 @@ from algorix.scan import SCAN_LOOKBACK_SESSIONS
 from algorix.scoring import score_universe
 from algorix.series import load_series
 from algorix.storage import (
+    ChartDrawingRepository,
     DeliveryRepository,
     Database,
     EarningsSurpriseRepository,
@@ -62,6 +65,15 @@ from algorix.universe import NIFTY_50, ConstituencyRepository
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 app = FastAPI(title="Algorix")
+# First static mount in the app -- holds chart-drawings.js, the ported
+# lightweight-charts primitive for trendlines/markers. Kept out of the
+# templates' inline <script> because it's ~150 lines of self-contained
+# canvas code with zero Jinja dependency.
+app.mount(
+    "/static",
+    StaticFiles(directory=str(Path(__file__).parent / "static")),
+    name="static",
+)
 
 _state: dict[str, object] = {}
 
@@ -107,6 +119,46 @@ def _fmt(value, spec: str = ".1f") -> dict:
         "title": value.reason or "unavailable",
         "available": False,
     }
+
+
+# UI-only heuristic thresholds for the stock chart's auto-highlight markers
+# -- never read by scoring.py. A first pass, easy to retune; not scoring
+# rules, just "is this worth a visual flag on the chart right now."
+_BREAKOUT_DONCHIAN_THRESHOLD = 95.0  # top of the N-session Donchian channel
+_DIP_PULLBACK_THRESHOLD = -3.0       # % short-term return, while in an uptrend
+
+
+def _auto_markers(donchian_pos, short_return, trend, latest_date) -> list[dict]:
+    """System-detected breakout/dip highlights for the chart.
+
+    Computed fresh on every page load from indicators this page already
+    displays (A4 Donchian position, A5 short-term return, A3 trend state)
+    -- never persisted, so they can't go stale and need no sync logic. Only
+    the latest session is evaluated, because that is the only session these
+    indicators are computed for here; a full historical breakout/dip series
+    would need rolling recomputation across the whole loaded window, which
+    is out of scope for a chart overlay.
+
+    Distinct from ChartDrawing: a user can also *manually* place a
+    breakout/dip marker (persisted, tool_type "breakout"/"dip"), but that is
+    a different code path (create_drawing) -- this function only ever
+    produces the automatic, unsaved kind.
+    """
+    markers = []
+    if donchian_pos.available and donchian_pos.value >= _BREAKOUT_DONCHIAN_THRESHOLD:
+        markers.append({
+            "time": latest_date.isoformat(), "position": "belowBar",
+            "shape": "arrowUp", "color": "--good", "text": "Breakout",
+        })
+    if (
+        trend is not None and trend.is_uptrend
+        and short_return.available and short_return.value <= _DIP_PULLBACK_THRESHOLD
+    ):
+        markers.append({
+            "time": latest_date.isoformat(), "position": "aboveBar",
+            "shape": "arrowDown", "color": "--warn", "text": "Dip",
+        })
+    return markers
 
 
 def _load_universe(as_of: date, index_symbol: str):
@@ -256,18 +308,24 @@ def stock_detail(request: Request, symbol: str):
     )
 
     state = trend_state(series, calendar)
+    donchian_pos = donchian_position(series, calendar=calendar)
+    short_return = short_term_return(series, calendar=calendar)
     indicators = [
         ("A2", "52-week high proximity", _fmt(pct_of_52_week_high(series, calendar)), "%"),
-        ("A4", "Donchian position", _fmt(donchian_position(series, calendar=calendar)), "%"),
-        ("A5", "5-session return", _fmt(short_term_return(series, calendar=calendar)), "%"),
+        ("A4", "Donchian position", _fmt(donchian_pos), "%"),
+        ("A5", "5-session return", _fmt(short_return), "%"),
         ("A6", "delivery %", _fmt(latest_delivery_pct(records)), "%"),
         ("A6", "delivery trend", _fmt(delivery_trend(records), ".2f"), "x"),
         ("A7", "relative volume", _fmt(relative_volume(series, calendar=calendar), ".2f"), "x"),
         ("C1", "ATR", _fmt(atr_percent(series, calendar=calendar), ".2f"), "%"),
     ]
 
-    closes = [b.close for b in series.window(120)] if series.bars else []
     history = Journal(db).history_for(symbol, limit=60)
+    latest = series.bars[-1] if series.bars else None
+    auto_markers = (
+        _auto_markers(donchian_pos, short_return, state, latest.session_date)
+        if latest else []
+    )
 
     return TEMPLATES.TemplateResponse(
         request=request,
@@ -277,12 +335,11 @@ def stock_detail(request: Request, symbol: str):
             "name": instrument.name,
             "as_of": as_of,
             "series": series,
-            "closes": closes,
-            "sparkline": _sparkline(closes),
             "trend": state,
             "indicators": indicators,
             "history": history,
-            "latest": series.bars[-1] if series.bars else None,
+            "latest": latest,
+            "auto_markers": auto_markers,
         },
     )
 
@@ -315,6 +372,100 @@ def stock_bars(symbol: str):
         }
         for b in series.bars
     ]
+
+
+class DrawingPoint(BaseModel):
+    time: str
+    price: float
+
+
+class DrawingCreate(BaseModel):
+    tool_type: str
+    points: list[DrawingPoint]
+
+
+# Known drawing tools and how many points each needs. Adding a future tool
+# (horizontal line, rectangle, fib retracement) is one entry here plus a
+# client-side renderer -- never a schema change, never a new route.
+_DRAWING_POINT_COUNTS: dict[str, int] = {"trendline": 2, "breakout": 1, "dip": 1}
+
+
+def _serialize_drawing(d: ChartDrawing) -> dict:
+    return {
+        "id": d.id,
+        "tool_type": d.tool_type,
+        "points": d.points,
+        "created_at": d.created_at.isoformat() if d.created_at else None,
+    }
+
+
+@app.get("/stock/{symbol}/drawings")
+def list_drawings(symbol: str):
+    """Persisted chart annotations for this instrument (user-drawn
+    trendlines, manually-placed breakout/dip markers).
+
+    Same convention as /bars: an unknown symbol is informational-empty
+    (200 []), not an error -- "no drawings exist" and "the symbol doesn't
+    exist" both mean the chart overlays nothing, and the page itself
+    already empty-states an unknown symbol before any client script runs.
+    """
+    db = _db()
+    instrument = InstrumentRepository(db).get(symbol.upper(), Exchange.NSE)
+    if instrument is None or instrument.id is None:
+        return []
+    drawings = ChartDrawingRepository(db).list_for(instrument.id)
+    return [_serialize_drawing(d) for d in drawings]
+
+
+@app.post("/stock/{symbol}/drawings", status_code=201)
+def create_drawing(symbol: str, body: DrawingCreate):
+    """Persist one drawn annotation.
+
+    Unlike the GET route, an unknown symbol here IS a real error: creating
+    a drawing means attaching it to a specific instrument, and there is
+    nothing to attach it to -- a write against a nonexistent resource is
+    rejected (404), not silently accepted or silently dropped.
+    """
+    db = _db()
+    instrument = InstrumentRepository(db).get(symbol.upper(), Exchange.NSE)
+    if instrument is None or instrument.id is None:
+        raise HTTPException(404, f"{symbol.upper()} is not in the database.")
+
+    expected = _DRAWING_POINT_COUNTS.get(body.tool_type)
+    if expected is None:
+        raise HTTPException(400, f"unknown tool_type {body.tool_type!r}")
+    if len(body.points) != expected:
+        raise HTTPException(
+            400,
+            f"{body.tool_type} requires exactly {expected} point(s), "
+            f"got {len(body.points)}",
+        )
+
+    drawing = ChartDrawing(
+        instrument_id=instrument.id,
+        tool_type=body.tool_type,
+        points=[{"time": p.time, "price": p.price} for p in body.points],
+    )
+    created = ChartDrawingRepository(db).create(drawing)
+    return _serialize_drawing(created)
+
+
+@app.delete("/stock/{symbol}/drawings/{drawing_id}", status_code=204)
+def delete_drawing(symbol: str, drawing_id: int):
+    """Delete one annotation, scoped to its instrument.
+
+    Unknown symbol, unknown drawing id, and a real drawing id that belongs
+    to a *different* instrument all 404 -- from the caller's perspective
+    all three mean "there is no such drawing under this symbol." The
+    instrument-scoped delete in ChartDrawingRepository.delete() makes the
+    cross-instrument case structurally impossible, not just checked for.
+    """
+    db = _db()
+    instrument = InstrumentRepository(db).get(symbol.upper(), Exchange.NSE)
+    if instrument is None or instrument.id is None:
+        raise HTTPException(404, f"{symbol.upper()} is not in the database.")
+    if not ChartDrawingRepository(db).delete(drawing_id, instrument.id):
+        raise HTTPException(404, f"drawing {drawing_id} not found for {symbol.upper()}")
 
 
 @app.get("/backtest", response_class=HTMLResponse)
@@ -369,20 +520,6 @@ def journal_view(request: Request):
             "latest_session": sessions[0] if sessions else None,
         },
     )
-
-
-def _sparkline(values: list[float], width: int = 560, height: int = 90) -> str:
-    """Inline SVG polyline -- a chart without a charting dependency."""
-    if len(values) < 2:
-        return ""
-    low, high = min(values), max(values)
-    span = (high - low) or 1.0
-    step = width / (len(values) - 1)
-    points = " ".join(
-        f"{i * step:.1f},{height - ((v - low) / span) * height:.1f}"
-        for i, v in enumerate(values)
-    )
-    return points
 
 
 def main(argv: list[str] | None = None) -> int:

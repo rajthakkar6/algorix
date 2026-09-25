@@ -11,10 +11,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from algorix.journal import Journal
-from algorix.models import Bar, DeliveryRecord, Exchange
+from algorix.models import Bar, ChartDrawing, DeliveryRecord, Exchange
 from algorix.regime import seed_regime_instruments
 from algorix.storage import (
     BarRepository,
+    ChartDrawingRepository,
     Database,
     DeliveryRepository,
     InstrumentRepository,
@@ -142,8 +143,22 @@ def test_stock_page_lists_indicators(client):
     assert "delivery trend" in text
 
 
-def test_stock_page_draws_a_sparkline(client):
-    assert "<polyline" in client.get("/stock/S5").text
+def test_stock_page_embeds_the_chart(client):
+    text = client.get("/stock/S5").text
+
+    assert 'id="price-chart"' in text
+    assert "/stock/S5/bars" in text
+
+
+def test_stock_page_embeds_drawing_controls(client):
+    text = client.get("/stock/S5").text
+
+    assert 'data-tool="trendline"' in text
+    assert 'data-tool="breakout"' in text
+    assert 'data-tool="dip"' in text
+    assert 'id="drawing-list"' in text
+    assert "/static/chart-drawings.js" in text
+    assert "/stock/S5/drawings" in text
 
 
 def test_unknown_symbol_is_handled(client):
@@ -182,6 +197,317 @@ def test_missing_indicator_shows_a_dash_not_zero(seeded, tmp_path, monkeypatch):
 
     assert "--" in text
     assert "never shown as zero" in text
+
+
+# --- auto markers (breakout/dip highlights) ---------------------------------
+
+
+def _trend(is_uptrend: bool):
+    from algorix.indicators import TrendState
+
+    return TrendState(
+        above_fast=is_uptrend, above_slow=is_uptrend, fast_above_slow=is_uptrend,
+        fast_rising=is_uptrend, pct_from_fast=2.0 if is_uptrend else -2.0,
+        pct_from_slow=4.0 if is_uptrend else -4.0,
+    )
+
+
+def test_auto_markers_flags_a_breakout():
+    from algorix.series import IndicatorValue
+    from algorix.web.server import _auto_markers
+
+    markers = _auto_markers(
+        IndicatorValue.of(97.0), IndicatorValue.of(0.5), _trend(True), TARGET
+    )
+
+    assert len(markers) == 1
+    assert markers[0]["text"] == "Breakout"
+    assert markers[0]["time"] == TARGET.isoformat()
+
+
+def test_auto_markers_flags_a_dip_within_an_uptrend():
+    from algorix.series import IndicatorValue
+    from algorix.web.server import _auto_markers
+
+    markers = _auto_markers(
+        IndicatorValue.of(50.0), IndicatorValue.of(-5.0), _trend(True), TARGET
+    )
+
+    assert len(markers) == 1
+    assert markers[0]["text"] == "Dip"
+
+
+def test_auto_markers_ignores_a_pullback_outside_an_uptrend():
+    """A falling stock pulling back further is not a 'dip worth watching' --
+    the dip marker only means something inside an established uptrend."""
+    from algorix.series import IndicatorValue
+    from algorix.web.server import _auto_markers
+
+    markers = _auto_markers(
+        IndicatorValue.of(50.0), IndicatorValue.of(-5.0), _trend(False), TARGET
+    )
+
+    assert markers == []
+
+
+def test_auto_markers_handles_unavailable_indicators():
+    """A missing indicator must not crash the marker computation or be
+    silently treated as satisfying the threshold."""
+    from algorix.series import IndicatorValue
+    from algorix.web.server import _auto_markers
+
+    markers = _auto_markers(
+        IndicatorValue.unavailable("not enough history"),
+        IndicatorValue.unavailable("not enough history"),
+        _trend(True), TARGET,
+    )
+
+    assert markers == []
+
+
+def test_auto_markers_neither_condition_is_empty():
+    from algorix.series import IndicatorValue
+    from algorix.web.server import _auto_markers
+
+    markers = _auto_markers(
+        IndicatorValue.of(50.0), IndicatorValue.of(0.5), _trend(True), TARGET
+    )
+
+    assert markers == []
+
+
+def test_auto_markers_with_no_trend_state_is_empty():
+    """trend_state() returns None when history is too short -- must not
+    crash, and a dip can't be evaluated without knowing the trend."""
+    from algorix.series import IndicatorValue
+    from algorix.web.server import _auto_markers
+
+    markers = _auto_markers(
+        IndicatorValue.of(50.0), IndicatorValue.of(-5.0), None, TARGET
+    )
+
+    assert markers == []
+
+
+# --- stock bars (chart data) API -------------------------------------------
+
+
+def test_bars_route_returns_ohlcv_json(client):
+    response = client.get("/stock/S5/bars")
+    bars = response.json()
+
+    assert response.status_code == 200
+    assert len(bars) > 0
+    first = bars[0]
+    assert set(first) == {"time", "open", "high", "low", "close", "volume"}
+    assert first["time"] == first["time"][:10]  # YYYY-MM-DD, no time component
+    # Ascending by date, matching the price series order.
+    assert [b["time"] for b in bars] == sorted(b["time"] for b in bars)
+
+
+def test_bars_route_case_insensitive(client):
+    assert client.get("/stock/s5/bars").json() == client.get("/stock/S5/bars").json()
+
+
+def test_bars_route_for_unknown_symbol_returns_empty_list(client):
+    response = client.get("/stock/NOSUCH/bars")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_bars_route_for_instrument_with_no_price_history(seeded, monkeypatch):
+    """An instrument can exist without ever having ingested bars for it."""
+    import algorix.web.server as web_app
+    from algorix.models import Instrument, InstrumentType
+
+    InstrumentRepository(seeded).upsert(
+        Instrument(symbol="NOBARS", exchange=Exchange.NSE,
+                   instrument_type=InstrumentType.EQUITY)
+    )
+    monkeypatch.setattr(web_app, "_current_session", lambda: TARGET)
+
+    response = TestClient(app).get("/stock/NOBARS/bars")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+# --- static assets -----------------------------------------------------------
+
+
+def test_chart_drawings_js_is_served(client):
+    response = client.get("/static/chart-drawings.js")
+
+    assert response.status_code == 200
+    assert "AlgorixDrawingTools" in response.text
+
+
+# --- chart drawings API -----------------------------------------------------
+
+
+def _instrument_id(db, symbol):
+    return InstrumentRepository(db).get(symbol, Exchange.NSE).id
+
+
+def test_list_drawings_returns_seeded_rows(client, seeded):
+    repo = ChartDrawingRepository(seeded)
+    repo.create(ChartDrawing(
+        instrument_id=_instrument_id(seeded, "S5"), tool_type="trendline",
+        points=[{"time": "2026-09-01", "price": 100.0},
+                {"time": "2026-09-18", "price": 110.0}],
+    ))
+    repo.create(ChartDrawing(
+        instrument_id=_instrument_id(seeded, "S5"), tool_type="breakout",
+        points=[{"time": "2026-09-18", "price": 110.0}],
+    ))
+
+    bodies = client.get("/stock/S5/drawings").json()
+
+    assert len(bodies) == 2
+    assert {d["tool_type"] for d in bodies} == {"trendline", "breakout"}
+    assert all(set(d) == {"id", "tool_type", "points", "created_at"} for d in bodies)
+
+
+def test_list_drawings_when_none_stored_is_empty(client):
+    assert client.get("/stock/S5/drawings").json() == []
+
+
+def test_list_drawings_for_unknown_symbol_returns_empty_list(client):
+    response = client.get("/stock/NOSUCH/drawings")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_list_drawings_case_insensitive(client, seeded):
+    ChartDrawingRepository(seeded).create(ChartDrawing(
+        instrument_id=_instrument_id(seeded, "S5"), tool_type="dip",
+        points=[{"time": "2026-09-18", "price": 90.0}],
+    ))
+
+    assert client.get("/stock/s5/drawings").json() == client.get("/stock/S5/drawings").json()
+
+
+def test_create_trendline_persists_and_is_listed(client):
+    response = client.post("/stock/S5/drawings", json={
+        "tool_type": "trendline",
+        "points": [{"time": "2026-09-01", "price": 100.0},
+                   {"time": "2026-09-18", "price": 110.0}],
+    })
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["tool_type"] == "trendline"
+    assert body["id"] is not None
+
+    listed = client.get("/stock/S5/drawings").json()
+    assert [d["id"] for d in listed] == [body["id"]]
+
+
+def test_create_drawing_for_unknown_symbol_is_rejected(client):
+    response = client.post("/stock/NOSUCH/drawings", json={
+        "tool_type": "trendline",
+        "points": [{"time": "2026-09-01", "price": 100.0},
+                   {"time": "2026-09-18", "price": 110.0}],
+    })
+
+    assert response.status_code == 404
+
+
+def test_create_drawing_with_unregistered_tool_type_is_rejected(client):
+    response = client.post("/stock/S5/drawings", json={
+        "tool_type": "rectangle",
+        "points": [{"time": "2026-09-01", "price": 100.0}],
+    })
+
+    assert response.status_code == 400
+
+
+def test_create_trendline_with_wrong_point_count_is_rejected(client):
+    too_few = client.post("/stock/S5/drawings", json={
+        "tool_type": "trendline",
+        "points": [{"time": "2026-09-01", "price": 100.0}],
+    })
+    too_many = client.post("/stock/S5/drawings", json={
+        "tool_type": "trendline",
+        "points": [{"time": "2026-09-01", "price": 100.0}] * 3,
+    })
+
+    assert too_few.status_code == 400
+    assert too_many.status_code == 400
+
+
+def test_create_drawing_with_missing_field_is_rejected(client):
+    response = client.post("/stock/S5/drawings", json={"tool_type": "trendline"})
+
+    assert response.status_code == 422
+
+
+def test_create_drawing_with_non_numeric_price_is_rejected(client):
+    response = client.post("/stock/S5/drawings", json={
+        "tool_type": "breakout",
+        "points": [{"time": "2026-09-18", "price": "abc"}],
+    })
+
+    assert response.status_code == 422
+
+
+def test_delete_drawing_removes_it(client):
+    created = client.post("/stock/S5/drawings", json={
+        "tool_type": "breakout",
+        "points": [{"time": "2026-09-18", "price": 110.0}],
+    }).json()
+
+    response = client.delete(f"/stock/S5/drawings/{created['id']}")
+
+    assert response.status_code == 204
+    assert client.get("/stock/S5/drawings").json() == []
+
+
+def test_delete_drawing_for_unknown_symbol_is_rejected(client):
+    response = client.delete("/stock/NOSUCH/drawings/1")
+
+    assert response.status_code == 404
+
+
+def test_delete_nonexistent_drawing_id_is_rejected(client):
+    response = client.delete("/stock/S5/drawings/999999")
+
+    assert response.status_code == 404
+
+
+def test_delete_drawing_under_wrong_symbol_is_rejected(client):
+    """A drawing id that is real, but belongs to a different instrument,
+    must not be deletable by guessing the id under another symbol."""
+    created = client.post("/stock/S5/drawings", json={
+        "tool_type": "breakout",
+        "points": [{"time": "2026-09-18", "price": 110.0}],
+    }).json()
+
+    response = client.delete(f"/stock/S6/drawings/{created['id']}")
+
+    assert response.status_code == 404
+    assert [d["id"] for d in client.get("/stock/S5/drawings").json()] == [created["id"]]
+
+
+def test_deleting_the_same_drawing_twice_is_rejected_the_second_time(client):
+    created = client.post("/stock/S5/drawings", json={
+        "tool_type": "breakout",
+        "points": [{"time": "2026-09-18", "price": 110.0}],
+    }).json()
+
+    first = client.delete(f"/stock/S5/drawings/{created['id']}")
+    second = client.delete(f"/stock/S5/drawings/{created['id']}")
+
+    assert first.status_code == 204
+    assert second.status_code == 404
+
+
+def test_delete_drawing_with_non_integer_id_is_rejected(client):
+    response = client.delete("/stock/S5/drawings/abc")
+
+    assert response.status_code == 422
 
 
 # --- backtest -------------------------------------------------------------

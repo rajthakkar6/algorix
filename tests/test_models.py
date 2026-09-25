@@ -5,7 +5,14 @@ from datetime import date
 import pytest
 
 from algorix.exceptions import DataIntegrityError
-from algorix.models import Bar, DeliveryRecord, Exchange, Instrument, InstrumentType
+from algorix.models import (
+    Bar,
+    ChartDrawing,
+    DeliveryRecord,
+    Exchange,
+    Instrument,
+    InstrumentType,
+)
 
 SESSION = date(2026, 9, 18)
 
@@ -244,4 +251,70 @@ def test_negative_delivered_quantity_is_rejected():
     ):
         DeliveryRecord(
             session_date=SESSION, traded_quantity=100, delivered_quantity=-1
+        )
+
+
+# --------------------------------------------------------------------------
+# ChartDrawing -- positive and negative
+# --------------------------------------------------------------------------
+
+
+def test_trendline_with_two_points_is_valid():
+    drawing = ChartDrawing(
+        instrument_id=1,
+        tool_type="trendline",
+        points=[
+            {"time": "2026-09-01", "price": 100.0},
+            {"time": "2026-09-18", "price": 110.0},
+        ],
+    )
+
+    assert drawing.tool_type == "trendline"
+    assert len(drawing.points) == 2
+    assert drawing.id is None
+    assert drawing.created_at is None
+
+
+def test_breakout_marker_with_one_point_is_valid():
+    drawing = ChartDrawing(
+        instrument_id=1,
+        tool_type="breakout",
+        points=[{"time": "2026-09-18", "price": 110.0}],
+    )
+
+    assert drawing.tool_type == "breakout"
+
+
+def test_empty_tool_type_is_rejected():
+    with pytest.raises(DataIntegrityError, match="tool_type cannot be empty"):
+        ChartDrawing(
+            instrument_id=1, tool_type="",
+            points=[{"time": "2026-09-18", "price": 110.0}],
+        )
+
+
+def test_whitespace_tool_type_is_rejected():
+    with pytest.raises(DataIntegrityError, match="tool_type cannot be empty"):
+        ChartDrawing(
+            instrument_id=1, tool_type="   ",
+            points=[{"time": "2026-09-18", "price": 110.0}],
+        )
+
+
+def test_empty_points_is_rejected():
+    with pytest.raises(DataIntegrityError, match="points cannot be empty"):
+        ChartDrawing(instrument_id=1, tool_type="trendline", points=[])
+
+
+def test_point_missing_time_is_rejected():
+    with pytest.raises(DataIntegrityError, match="missing 'time' or 'price'"):
+        ChartDrawing(
+            instrument_id=1, tool_type="breakout", points=[{"price": 110.0}]
+        )
+
+
+def test_point_missing_price_is_rejected():
+    with pytest.raises(DataIntegrityError, match="missing 'time' or 'price'"):
+        ChartDrawing(
+            instrument_id=1, tool_type="breakout", points=[{"time": "2026-09-18"}]
         )

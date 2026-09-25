@@ -9,6 +9,7 @@ from algorix.exceptions import StorageError
 from algorix.models import (
     Bar,
     CalendarPolicy,
+    ChartDrawing,
     DeliveryRecord,
     Exchange,
     Instrument,
@@ -17,6 +18,7 @@ from algorix.models import (
 from algorix.storage import (
     SCHEMA_VERSION,
     BarRepository,
+    ChartDrawingRepository,
     Database,
     DeliveryRepository,
     InstrumentRepository,
@@ -642,3 +644,119 @@ def test_delivery_for_unknown_instrument_is_rejected(db):
             ],
             source="test",
         )
+
+
+# --------------------------------------------------------------------------
+# Chart drawings
+# --------------------------------------------------------------------------
+
+
+def make_trendline(instrument_id: int) -> ChartDrawing:
+    return ChartDrawing(
+        instrument_id=instrument_id,
+        tool_type="trendline",
+        points=[
+            {"time": "2026-09-01", "price": 100.0},
+            {"time": "2026-09-18", "price": 110.5},
+        ],
+    )
+
+
+def test_chart_drawing_round_trip(db, reliance):
+    repo = ChartDrawingRepository(db)
+
+    created = repo.create(make_trendline(reliance))
+
+    assert created.id is not None
+    assert created.created_at is not None
+    stored = repo.list_for(reliance)
+    assert len(stored) == 1
+    assert stored[0].id == created.id
+    assert stored[0].tool_type == "trendline"
+    assert stored[0].points == [
+        {"time": "2026-09-01", "price": 100.0},
+        {"time": "2026-09-18", "price": 110.5},
+    ]
+
+
+def test_multiple_drawings_are_ordered_by_created_at(db, reliance):
+    repo = ChartDrawingRepository(db)
+    first = repo.create(make_trendline(reliance))
+    second = repo.create(
+        ChartDrawing(
+            instrument_id=reliance, tool_type="breakout",
+            points=[{"time": "2026-09-20", "price": 120.0}],
+        )
+    )
+
+    stored = repo.list_for(reliance)
+
+    assert [d.id for d in stored] == [first.id, second.id]
+
+
+def test_drawings_for_instrument_with_none_stored_is_empty(db, reliance):
+    repo = ChartDrawingRepository(db)
+
+    assert repo.list_for(reliance) == []
+
+
+def test_drawings_are_isolated_per_instrument(db, instruments, reliance):
+    tcs = instruments.upsert(
+        Instrument(symbol="TCS", exchange=Exchange.NSE,
+                   instrument_type=InstrumentType.EQUITY)
+    )
+    repo = ChartDrawingRepository(db)
+    repo.create(make_trendline(reliance))
+
+    assert repo.list_for(tcs) == []
+
+
+def test_delete_existing_drawing_returns_true_and_removes_it(db, reliance):
+    repo = ChartDrawingRepository(db)
+    created = repo.create(make_trendline(reliance))
+
+    assert repo.delete(created.id, reliance) is True
+    assert repo.list_for(reliance) == []
+
+
+def test_delete_nonexistent_drawing_returns_false(db, reliance):
+    repo = ChartDrawingRepository(db)
+
+    assert repo.delete(9999, reliance) is False
+
+
+def test_delete_with_wrong_instrument_id_does_not_delete(db, instruments, reliance):
+    """A delete for a real drawing id under the wrong symbol must fail, not
+    silently delete another instrument's annotation."""
+    tcs = instruments.upsert(
+        Instrument(symbol="TCS", exchange=Exchange.NSE,
+                   instrument_type=InstrumentType.EQUITY)
+    )
+    repo = ChartDrawingRepository(db)
+    created = repo.create(make_trendline(reliance))
+
+    assert repo.delete(created.id, tcs) is False
+    assert repo.list_for(reliance) == [created]
+
+
+def test_schema_rejects_invalid_json_in_points(db, reliance):
+    with pytest.raises(sqlite3.IntegrityError):
+        with db.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO chart_drawings
+                    (instrument_id, tool_type, points, created_at)
+                VALUES (?, 'trendline', 'not json', 'now')
+                """,
+                (reliance,),
+            )
+
+
+def test_deleting_instrument_cascades_to_chart_drawings(db, reliance):
+    repo = ChartDrawingRepository(db)
+    repo.create(make_trendline(reliance))
+
+    with db.connect() as conn:
+        conn.execute("DELETE FROM instruments WHERE id = ?", (reliance,))
+
+    assert repo.list_for(reliance) == []

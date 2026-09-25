@@ -321,3 +321,41 @@ class EarningsSurpriseRecord:
     def __post_init__(self) -> None:
         if not self.symbol or not self.symbol.strip():
             raise DataIntegrityError("earnings surprise: symbol cannot be empty")
+
+
+@dataclass(frozen=True)
+class ChartDrawing:
+    """One persisted chart annotation: a user-drawn trendline, or a
+    manually-placed breakout/dip marker on the stock detail page's chart.
+
+    Auto-detected breakout/dip highlights are NOT instances of this -- they
+    are computed fresh on every page load in web/server.py and never stored
+    (see `stock_detail`'s auto-marker helper). Only user-placed annotations
+    reach this class.
+
+    This is a UI-only annotation layer. Nothing in scoring.py, scan.py, or
+    the journal reads chart_drawings -- it must stay that way, the same
+    boundary invariant 2 draws around sentiment.
+
+    `points` is intentionally opaque here: how many points there are and
+    what they mean depends on `tool_type` (two endpoints for a trendline,
+    one point for a breakout/dip marker) -- a future tool type is a new
+    string value here, not a schema or dataclass change.
+    """
+
+    instrument_id: int
+    tool_type: str
+    points: list[dict[str, float | str]]
+    id: int | None = None
+    created_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if not self.tool_type or not self.tool_type.strip():
+            raise DataIntegrityError("chart drawing: tool_type cannot be empty")
+        if not self.points:
+            raise DataIntegrityError("chart drawing: points cannot be empty")
+        for point in self.points:
+            if "time" not in point or "price" not in point:
+                raise DataIntegrityError(
+                    f"chart drawing: point {point!r} missing 'time' or 'price'"
+                )
