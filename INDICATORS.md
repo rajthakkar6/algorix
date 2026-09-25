@@ -315,6 +315,11 @@ too noisy and low-frequency to score on reliably.
 | Candlestick patterns | Reject | Weak to no out-of-sample evidence; high false-positive rate. |
 | Elliott Wave | Reject | Unfalsifiable and subjective — cannot be scored reproducibly. |
 | 20 DMA | Demoted | Redundant beside 50 DMA at a days–weeks horizon; 200 DMA adds more (see A3). |
+| **VWAP** | Reject (as a score input) | An intraday-execution benchmark (buy below the day's volume-weighted average, sell above) — it resets each session and answers "did I get filled at a good price today," not "is this a good multi-week opportunity." Conflicts with invariant 3 (daily-cadence score, not intraday). Legitimate as a *chart overlay for manual execution*, which is a UI concern, not a scoring one — see the chart-tooling work in PROJECT_SCOPE §6. |
+| **Supertrend** | Reject | An ATR-multiplier band flipped into a trend-following overlay — same job as A3 (trend state) + A4 (Donchian) + C1 (ATR), using different machinery to say the same thing. The evidence for it specifically argues against adding it: a cited Bayesian-optimized backtest on Nifty 50 names found *default-parameter* Supertrend lost money (-1.16%) — it needs hand-tuned parameters to be profitable, which is exactly the overfitting risk `scoring.py`'s "equal weights, no hand-tuning yet" principle exists to avoid. |
+| **EMA (9/21) crossover** | Reject | A moving-average crossover system — structurally what MACD already reduces to (already rejected above for the same reason), and redundant with A3's existing 50/200 DMA + slope. Even sources recommending it note it is "rarely profitable alone; used as confirmation," i.e. not an independent signal. |
+
+(VWAP/Supertrend/EMA evaluated Sep 2026 against a list of indicators cited as popular among Indian retail/intraday traders in 2026, prompted by the user. None were previously discussed in this document. Verdicts above follow the same reasoning already applied to RSI/MACD/Bollinger; open to revisiting if a concrete case is made for reconsidering one.)
 
 ---
 

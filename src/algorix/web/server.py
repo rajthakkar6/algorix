@@ -287,6 +287,36 @@ def stock_detail(request: Request, symbol: str):
     )
 
 
+@app.get("/stock/{symbol}/bars")
+def stock_bars(symbol: str):
+    """OHLCV for the interactive chart on the stock detail page.
+
+    The only JSON route in this app -- every other page is server-rendered
+    (see this module's own docstring on why). A pannable, zoomable candle
+    chart is the one thing server-rendered SVG genuinely cannot do well;
+    everything else on the page stays server-rendered. `time` is the
+    session date as `YYYY-MM-DD`, the format lightweight-charts' business-
+    day mode expects directly, no client-side date parsing needed.
+    """
+    db, calendar = _db(), _calendar()
+    symbol = symbol.upper()
+    as_of = _current_session()
+
+    instrument = InstrumentRepository(db).get(symbol, Exchange.NSE)
+    if instrument is None or instrument.id is None:
+        return []
+
+    series = load_series(db, instrument.id, as_of, SCAN_LOOKBACK_SESSIONS, calendar)
+    return [
+        {
+            "time": b.session_date.isoformat(),
+            "open": b.open, "high": b.high, "low": b.low, "close": b.close,
+            "volume": b.volume,
+        }
+        for b in series.bars
+    ]
+
+
 @app.get("/backtest", response_class=HTMLResponse)
 def backtest_view(request: Request, sessions: int = 250, horizon: int = 20):
     """Replay results -- does the score actually predict returns?"""

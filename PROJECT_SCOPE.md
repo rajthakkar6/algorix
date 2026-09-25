@@ -11,6 +11,20 @@ Sections marked **[OPEN]** are decisions still needed.
 
 ## 0. Build Status
 
+> **⏸ PAUSED MID-TASK (2026-09-25) — read this first if resuming.**
+> An interactive price chart (§6, "Chart UI / advance tooling") is
+> **partially built and uncommitted** in the working tree right now:
+> `src/algorix/web/server.py` and `src/algorix/web/templates/stock.html`
+> have real, uncommitted changes. Do **not** treat this as done — no
+> tests were written, the app was never actually run to confirm the
+> chart renders, and a small cleanup is still needed (see the TODO in
+> §6.1). Before doing anything else chart-related: run
+> `git diff -- src/algorix/web/` to see exactly what's there, read §6.1
+> below for the full plan and what's left, then finish that task before
+> starting anything new. If the working tree is somehow clean when you
+> read this, the work was finished and committed in a later session --
+> this note is stale, safe to delete.
+
 **The MVP morning scanner is built and working end to end** (485 tests),
 and has now been run against live data: 57 instruments, ~28.5k bars, a
 full 31-session delivery window, and all four regime gates reporting.
@@ -403,6 +417,90 @@ its own task; current gaps are 1–2 sessions per affected instrument.
 
 Captured here so nothing discussed gets lost, even though most of this is
 v2+.
+
+### 6.1 Chart UI / "advance tooling" phase (started Sep 2026, IN PROGRESS)
+
+User asked to move into a "next phase: advance tooling and user
+flexibility," starting with the stock detail page's chart. Two parts:
+
+**Part A — indicator audit (DONE, no code involved).** User pasted a
+list of indicators popular among Indian retail/intraday traders (VWAP,
+Supertrend, RSI, MACD, Bollinger Bands, EMA crossover) and asked which
+this project has. Answer recorded in INDICATORS.md Bucket E: RSI/MACD/
+Bollinger were already formally rejected with reasons; VWAP/Supertrend/
+EMA are new evaluations, all three recommended against (VWAP is an
+intraday-execution concept that conflicts with invariant 3's daily
+cadence; Supertrend's own cited evidence shows default parameters lose
+money, exactly the overfitting risk this project's equal-weighting
+principle exists to avoid; EMA crossover is structurally what MACD
+already reduces to). Read INDICATORS.md Bucket E for the full reasoning
+before reconsidering any of the three.
+
+**Part B — interactive chart (IN PROGRESS, uncommitted).** The stock
+detail page's chart was a static, hand-built SVG polyline of closing
+prices only — no OHLC, no volume, no pan/zoom. Replacing it with a real
+candlestick + volume chart, pannable/scrollable/zoomable.
+
+- **Library chosen:** TradingView's `lightweight-charts` v5.2.0
+  (MIT-licensed, ~45KB, loaded via a pinned CDN `<script>` tag --
+  `https://unpkg.com/lightweight-charts@5.2.0/dist/lightweight-charts.standalone.production.js`).
+  No npm, no build step. Every API call used (`createChart`,
+  `chart.addSeries(CandlestickSeries, ...)`,
+  `chart.addSeries(HistogramSeries, ..., 1)` for a separate volume pane,
+  `chart.panes()[1].setStretchFactor(...)`, `autoSize: true`) was checked
+  against the library's own current docs and its official SKILL.md before
+  writing it -- not recalled from training data, which is untrustworthy
+  for a library with no bundled skill in this environment. One thing
+  deliberately left unset: `crosshair.mode` -- two sources disagreed on
+  whether it takes a string or a numeric enum, so it was left at the
+  library's own default rather than guessed at.
+- **Design deviation, flagged not silently made:** `web/server.py`'s own
+  module docstring says "Deliberately boring technology... No build step,
+  no npm, no client framework." This introduces client-side JS for the
+  first time in this app. The "no build step" half is preserved (a CDN
+  script tag, no bundler); the "no client framework" half is now
+  narrowly not true, scoped to this one chart. Worth a conscious decision
+  on whether that's acceptable going forward, not just accepted by
+  default because it already happened.
+- **What exists right now, uncommitted:** a new read-only JSON route
+  `GET /stock/{symbol}/bars` in `web/server.py` returning OHLCV for the
+  loaded window (reuses data already loaded for the page, no new
+  ingestion), and `stock.html`'s sparkline block replaced with a
+  `<div id="price-chart">` + inline `<script>` that fetches that route
+  and renders candles + a volume pane, themed from the page's existing
+  light/dark CSS custom properties (`--good`/`--bad`/`--accent`/`--line`/
+  `--muted`) so it matches both themes without extra work.
+- **What is NOT done yet (do this before calling Part B finished):**
+  1. `server.py` still has dead code from the old sparkline
+     (`_sparkline()` function, the `closes` list computation, and the
+     now-unused `"closes"`/`"sparkline"` context keys in `stock_detail`)
+     -- remove them.
+  2. **No tests exist for the new `/stock/{symbol}/bars` route.** Needs
+     positive (known instrument returns correct OHLCV JSON shape) and
+     negative (unknown symbol, no price history stored) cases, per this
+     project's own rule that every task gets both.
+  3. **The app was never actually run and looked at.** No screenshot, no
+     manual check that the chart renders, panning works, or the CDN
+     script loads correctly. Do this before treating any of it as working
+     -- this project's own rule 5 is explicit that nothing gets called
+     done without being run end to end.
+  4. `tests/test_web.py::test_stock_page_draws_a_sparkline` will now fail
+     or needs rewriting -- it asserts on the old SVG polyline output,
+     which no longer exists on the page.
+- **Deliberately not started: drawing tools (trendlines).** The user
+  asked for line-drawing on the chart too. `lightweight-charts` v5 has a
+  plugin/primitives API that supports building custom drawing tools, but
+  this is a separate, larger task with one real open question that needs
+  the user's input before building it: **should a drawn line persist**
+  (saved to a new DB table, visible again on the next page load) or is
+  it session-only (simpler, no schema change, lost on refresh)? Ask
+  before building -- the answer changes the shape of the work
+  significantly (new storage layer + API vs. pure client-side state).
+  Note this is a UI/manual-annotation feature for a human looking at the
+  chart, not a new scoring indicator -- it does not reintroduce
+  chart-pattern recognition as an automated signal, which INDICATORS.md
+  Bucket E already rejects for weak out-of-sample evidence. Keep that
+  distinction explicit if this comes up again.
 
 - **Data ingestion**: fundamentals, news/event NLP, social sentiment,
   options flow, institutional/insider filings, promoter pledge tracking,
