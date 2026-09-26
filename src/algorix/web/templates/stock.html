@@ -3,8 +3,33 @@
 {% block ctx %}{{ as_of.strftime('%d %b %Y') }}{% endblock %}
 {% block body %}
 
-<h1>{{ symbol }}</h1>
+<div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap">
+  <h1 style="margin:0">{{ symbol }}</h1>
+  <button id="watchlist-toggle" class="btn {% if on_watchlist %}active{% endif %}"
+          type="button" data-on="{{ 'true' if on_watchlist else 'false' }}">
+    {{ 'On watchlist — remove' if on_watchlist else 'Add to watchlist' }}
+  </button>
+</div>
 <p class="sub">{{ name or '' }}{% if latest %} · close {{ '%.2f'|format(latest.close) }} · {{ series|length }} sessions stored{% endif %}</p>
+<script>
+(function () {
+  var btn = document.getElementById("watchlist-toggle");
+  if (!btn) return;
+  btn.addEventListener("click", function () {
+    var isOn = btn.getAttribute("data-on") === "true";
+    btn.disabled = true;
+    fetch("/stock/{{ symbol }}/watchlist", { method: isOn ? "DELETE" : "POST" })
+      .then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        btn.setAttribute("data-on", isOn ? "false" : "true");
+        btn.textContent = isOn ? "Add to watchlist" : "On watchlist — remove";
+        btn.classList.toggle("active", !isOn);
+      })
+      .catch(function () { /* leave state as-is -- a failed toggle must not silently look like it worked */ })
+      .finally(function () { btn.disabled = false; });
+  });
+})();
+</script>
 
 {% if latest %}
 <div class="panel">
@@ -291,6 +316,50 @@
   </table>
   <p class="sub" style="margin:12px 0 0">A dash means the indicator could not be computed — hover for why. It is never shown as zero.</p>
 </div>
+
+<div class="panel">
+  <h2 style="margin-top:0">Ask AI about {{ symbol }}</h2>
+  <p class="sub" style="margin:0 0 10px">
+    AI-generated commentary, not the quant score above — the two can disagree; that's expected, not a bug.
+  </p>
+  <div style="display:flex;gap:8px">
+    <input id="qa-input" type="text" placeholder="e.g. why is delivery% trending down?"
+           style="flex:1;padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:inherit">
+    <button id="qa-ask" class="btn" type="button">Ask</button>
+  </div>
+  <div id="qa-answer" class="sub" style="margin-top:10px;white-space:pre-wrap"></div>
+</div>
+<script>
+(function () {
+  var input = document.getElementById("qa-input");
+  var btn = document.getElementById("qa-ask");
+  var out = document.getElementById("qa-answer");
+  if (!btn) return;
+
+  function ask() {
+    var question = input.value.trim();
+    if (!question) return;
+    btn.disabled = true;
+    out.textContent = "thinking...";
+    fetch("/stock/{{ symbol }}/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question: question }),
+    })
+      .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
+      .then(function (res) {
+        if (!res.ok) { out.textContent = "error: " + (res.body.detail || "request failed"); return; }
+        if (!res.body.configured) { out.textContent = "AI Q&A is not configured: " + res.body.reason; return; }
+        out.textContent = res.body.answer + "\n\n(model: " + res.body.model_id + ")";
+      })
+      .catch(function () { out.textContent = "could not reach the server"; })
+      .finally(function () { btn.disabled = false; });
+  }
+
+  btn.addEventListener("click", ask);
+  input.addEventListener("keydown", function (e) { if (e.key === "Enter") ask(); });
+})();
+</script>
 
 <div class="panel">
   <h2 style="margin-top:0">Journal history</h2>

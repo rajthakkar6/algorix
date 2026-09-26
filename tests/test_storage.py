@@ -14,6 +14,7 @@ from algorix.models import (
     Exchange,
     Instrument,
     InstrumentType,
+    QaQuery,
 )
 from algorix.storage import (
     SCHEMA_VERSION,
@@ -22,6 +23,8 @@ from algorix.storage import (
     Database,
     DeliveryRepository,
     InstrumentRepository,
+    QaQueryRepository,
+    WatchlistRepository,
 )
 
 
@@ -212,6 +215,18 @@ def test_upsert_returns_id(instruments):
     )
 
     assert isinstance(instrument_id, int)
+
+
+def test_get_by_id_returns_the_right_instrument(instruments, reliance):
+    found = instruments.get_by_id(reliance)
+
+    assert found is not None
+    assert found.symbol == "RELIANCE"
+    assert found.id == reliance
+
+
+def test_get_by_id_for_nonexistent_id_is_none(instruments):
+    assert instruments.get_by_id(9999) is None
 
 
 def test_upsert_is_idempotent(instruments):
@@ -760,3 +775,157 @@ def test_deleting_instrument_cascades_to_chart_drawings(db, reliance):
         conn.execute("DELETE FROM instruments WHERE id = ?", (reliance,))
 
     assert repo.list_for(reliance) == []
+
+
+# --------------------------------------------------------------------------
+# Watchlist
+# --------------------------------------------------------------------------
+
+
+def test_watchlist_add_then_contains_then_remove(db, reliance):
+    repo = WatchlistRepository(db)
+
+    entry = repo.add(reliance)
+
+    assert entry.instrument_id == reliance
+    assert entry.added_at is not None
+    assert repo.contains(reliance) is True
+    assert [e.instrument_id for e in repo.list_all()] == [reliance]
+
+    assert repo.remove(reliance) is True
+    assert repo.contains(reliance) is False
+
+
+def test_watchlist_add_is_idempotent(db, reliance):
+    repo = WatchlistRepository(db)
+
+    first = repo.add(reliance)
+    second = repo.add(reliance)
+
+    assert first.added_at == second.added_at
+    assert len(repo.list_all()) == 1
+
+
+def test_watchlist_remove_never_added_returns_false(db, reliance):
+    assert WatchlistRepository(db).remove(reliance) is False
+
+
+def test_watchlist_list_all_when_empty(db):
+    assert WatchlistRepository(db).list_all() == []
+
+
+def test_watchlist_contains_for_never_added_is_false(db, reliance):
+    assert WatchlistRepository(db).contains(reliance) is False
+
+
+def test_watchlist_list_all_ordered_by_added_at(db, instruments, reliance):
+    tcs = instruments.upsert(
+        Instrument(symbol="TCS", exchange=Exchange.NSE,
+                   instrument_type=InstrumentType.EQUITY)
+    )
+    repo = WatchlistRepository(db)
+    repo.add(reliance)
+    repo.add(tcs)
+
+    assert [e.instrument_id for e in repo.list_all()] == [reliance, tcs]
+
+
+def test_deleting_instrument_cascades_to_watchlist(db, reliance):
+    repo = WatchlistRepository(db)
+    repo.add(reliance)
+
+    with db.connect() as conn:
+        conn.execute("DELETE FROM instruments WHERE id = ?", (reliance,))
+
+    assert repo.contains(reliance) is False
+
+
+# --------------------------------------------------------------------------
+# Q&A audit trail
+# --------------------------------------------------------------------------
+
+
+def make_qa_query(instrument_id: int) -> QaQuery:
+    return QaQuery(
+        instrument_id=instrument_id, question="Why the pullback?",
+        context={"score": 77.6, "indicators": ["A2", "A4"]},
+        answer="Delivery% dropped while price held near the 50 DMA.",
+        model_id="claude-sonnet-5", prompt_version=1,
+    )
+
+
+def test_qa_query_round_trip(db, reliance):
+    repo = QaQueryRepository(db)
+
+    created = repo.create(make_qa_query(reliance))
+
+    assert created.id is not None
+    assert created.asked_at is not None
+    stored = repo.history_for(reliance)
+    assert len(stored) == 1
+    assert stored[0].question == "Why the pullback?"
+    assert stored[0].context == {"score": 77.6, "indicators": ["A2", "A4"]}
+    assert stored[0].answer.startswith("Delivery%")
+    assert stored[0].model_id == "claude-sonnet-5"
+    assert stored[0].prompt_version == 1
+
+
+def test_qa_query_history_is_most_recent_first(db, reliance):
+    repo = QaQueryRepository(db)
+    first = repo.create(make_qa_query(reliance))
+    second = repo.create(make_qa_query(reliance))
+
+    stored = repo.history_for(reliance)
+
+    assert [q.id for q in stored] == [second.id, first.id]
+
+
+def test_qa_query_history_for_instrument_with_none_is_empty(db, reliance):
+    assert QaQueryRepository(db).history_for(reliance) == []
+
+
+def test_qa_query_history_respects_limit(db, reliance):
+    repo = QaQueryRepository(db)
+    for _ in range(3):
+        repo.create(make_qa_query(reliance))
+
+    assert len(repo.history_for(reliance, limit=2)) == 2
+
+
+def test_qa_query_schema_rejects_empty_question_directly(db, reliance):
+    with pytest.raises(sqlite3.IntegrityError):
+        with db.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO qa_queries
+                    (instrument_id, question, context, answer, model_id,
+                     prompt_version, asked_at)
+                VALUES (?, '', '{}', 'an answer', 'claude-sonnet-5', 1, 'now')
+                """,
+                (reliance,),
+            )
+
+
+def test_qa_query_schema_rejects_invalid_json_context(db, reliance):
+    with pytest.raises(sqlite3.IntegrityError):
+        with db.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO qa_queries
+                    (instrument_id, question, context, answer, model_id,
+                     prompt_version, asked_at)
+                VALUES (?, 'a question', 'not json', 'an answer',
+                        'claude-sonnet-5', 1, 'now')
+                """,
+                (reliance,),
+            )
+
+
+def test_deleting_instrument_cascades_to_qa_queries(db, reliance):
+    repo = QaQueryRepository(db)
+    repo.create(make_qa_query(reliance))
+
+    with db.connect() as conn:
+        conn.execute("DELETE FROM instruments WHERE id = ?", (reliance,))
+
+    assert repo.history_for(reliance) == []

@@ -5,7 +5,8 @@ and -- the rule carried from the rest of the codebase -- must show missing
 data as missing rather than as zero.
 """
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,6 +20,7 @@ from algorix.storage import (
     Database,
     DeliveryRepository,
     InstrumentRepository,
+    WatchlistRepository,
 )
 from algorix.universe import NIFTY_50, ConstituencyRepository, ConstituentRecord
 from algorix.web import app, configure
@@ -112,6 +114,15 @@ def test_dashboard_respects_top_parameter(client):
     assert few.count('class="sym"') == 3
 
 
+def test_dashboard_embeds_the_run_scan_control(client):
+    text = client.get("/").text
+
+    assert 'id="run-scan-btn"' in text
+    assert 'id="run-scan-status"' in text
+    assert "/scan/run" in text
+    assert "/scan/status" in text
+
+
 def test_dashboard_on_empty_database(tmp_path, monkeypatch):
     import algorix.web.server as web_app
 
@@ -159,6 +170,31 @@ def test_stock_page_embeds_drawing_controls(client):
     assert 'id="drawing-list"' in text
     assert "/static/chart-drawings.js" in text
     assert "/stock/S5/drawings" in text
+
+
+def test_stock_page_shows_add_to_watchlist_by_default(client):
+    text = client.get("/stock/S5").text
+
+    assert 'data-on="false"' in text
+    assert "Add to watchlist" in text
+
+
+def test_stock_page_shows_on_watchlist_state(client):
+    client.post("/stock/S5/watchlist")
+
+    text = client.get("/stock/S5").text
+
+    assert 'data-on="true"' in text
+    assert "On watchlist" in text
+
+
+def test_stock_page_embeds_the_qa_panel(client):
+    text = client.get("/stock/S5").text
+
+    assert 'id="qa-input"' in text
+    assert 'id="qa-ask"' in text
+    assert "/stock/S5/ask" in text
+    assert "AI-generated commentary, not the quant score" in text
 
 
 def test_unknown_symbol_is_handled(client):
@@ -508,6 +544,280 @@ def test_delete_drawing_with_non_integer_id_is_rejected(client):
     response = client.delete("/stock/S5/drawings/abc")
 
     assert response.status_code == 422
+
+
+# --- watchlist API -----------------------------------------------------------
+
+
+def test_add_to_watchlist_persists(client, seeded):
+    response = client.post("/stock/S5/watchlist")
+
+    assert response.status_code == 200
+    assert response.json()["symbol"] == "S5"
+    instrument_id = _instrument_id(seeded, "S5")
+    assert WatchlistRepository(seeded).contains(instrument_id) is True
+
+
+def test_add_to_watchlist_is_idempotent(client):
+    first = client.post("/stock/S5/watchlist")
+    second = client.post("/stock/S5/watchlist")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+
+
+def test_add_to_watchlist_unknown_symbol_is_rejected(client):
+    assert client.post("/stock/NOSUCH/watchlist").status_code == 404
+
+
+def test_remove_from_watchlist(client, seeded):
+    client.post("/stock/S5/watchlist")
+
+    response = client.delete("/stock/S5/watchlist")
+
+    assert response.status_code == 204
+    instrument_id = _instrument_id(seeded, "S5")
+    assert WatchlistRepository(seeded).contains(instrument_id) is False
+
+
+def test_remove_from_watchlist_unknown_symbol_is_rejected(client):
+    assert client.delete("/stock/NOSUCH/watchlist").status_code == 404
+
+
+def test_remove_from_watchlist_never_added_is_rejected(client):
+    assert client.delete("/stock/S5/watchlist").status_code == 404
+
+
+# --- AI Q&A API ----------------------------------------------------------------
+
+
+def test_ask_stock_question_success(client, monkeypatch):
+    import algorix.web.server as web_app
+
+    fake_query = SimpleNamespace(
+        answer="Delivery% has been trending down over the last week.",
+        model_id="claude-sonnet-5", prompt_version=1,
+        asked_at=datetime(2026, 9, 18, 10, 0, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(web_app, "ask_about_stock", lambda *a, **kw: fake_query)
+
+    response = client.post("/stock/S5/ask", json={"question": "Why the pullback?"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["configured"] is True
+    assert body["answer"] == fake_query.answer
+    assert body["model_id"] == "claude-sonnet-5"
+    assert body["prompt_version"] == 1
+
+
+def test_ask_stock_question_unknown_symbol_is_rejected(client):
+    response = client.post("/stock/NOSUCH/ask", json={"question": "Why?"})
+
+    assert response.status_code == 404
+
+
+def test_ask_stock_question_blank_is_rejected(client):
+    response = client.post("/stock/S5/ask", json={"question": "   "})
+
+    assert response.status_code == 422
+
+
+def test_ask_stock_question_missing_field_is_rejected(client):
+    response = client.post("/stock/S5/ask", json={})
+
+    assert response.status_code == 422
+
+
+def test_ask_stock_question_not_configured_is_reported_not_a_crash(client, monkeypatch):
+    import algorix.web.server as web_app
+    from algorix.sentiment import NotConfiguredError
+
+    def _raise(*a, **kw):
+        raise NotConfiguredError("ANTHROPIC_API_KEY is not set.")
+
+    monkeypatch.setattr(web_app, "ask_about_stock", _raise)
+
+    response = client.post("/stock/S5/ask", json={"question": "Why?"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["configured"] is False
+    assert "ANTHROPIC_API_KEY" in body["reason"]
+
+
+def test_ask_stock_question_source_failure_is_a_loud_502(client, monkeypatch):
+    import algorix.web.server as web_app
+    from algorix.exceptions import SourceUnreachableError
+
+    def _raise(*a, **kw):
+        raise SourceUnreachableError("Anthropic call failed: timeout")
+
+    monkeypatch.setattr(web_app, "ask_about_stock", _raise)
+
+    response = client.post("/stock/S5/ask", json={"question": "Why?"})
+
+    assert response.status_code == 502
+
+
+# --- watchlist page -----------------------------------------------------------
+
+
+def test_watchlist_page_shows_scored_symbol(client):
+    client.post("/stock/S5/watchlist")
+
+    text = client.get("/watchlist").text
+
+    assert "S5" in text
+    assert "score" in text.lower()
+
+
+def test_watchlist_page_when_empty(client):
+    text = client.get("/watchlist").text
+
+    assert "Nothing on your watchlist yet" in text
+    assert "Run `python -m algorix.refresh`" not in text  # not empty.html's message
+
+
+def test_watchlist_page_for_symbol_outside_tracked_universe(client, seeded, monkeypatch):
+    """A watchlisted instrument that isn't part of the currently-tracked
+    index (or was removed from it) must be shown with a reason, not
+    silently dropped from the page or given a fabricated score."""
+    import algorix.web.server as web_app
+    from algorix.models import Instrument, InstrumentType
+
+    untracked_id = InstrumentRepository(seeded).upsert(
+        Instrument(symbol="UNTRACKED", exchange=Exchange.NSE,
+                   instrument_type=InstrumentType.EQUITY)
+    )
+    WatchlistRepository(seeded).add(untracked_id)
+    monkeypatch.setattr(web_app, "_current_session", lambda: TARGET)
+
+    text = TestClient(app).get("/watchlist").text
+
+    assert "UNTRACKED" in text
+    assert "not in the currently tracked universe" in text
+
+
+def test_watchlist_row_shows_ineligible_reason_not_a_score():
+    """Direct unit test of the row-shaping helper for the ineligible case --
+    reproducing real ineligibility (liquidity/circuit-lock/F&O-ban/pledge
+    gates) through the full scan pipeline is not worth the fragility this
+    pure function can be tested against directly."""
+    from datetime import date as _date
+
+    from algorix.scoring import StockScore
+    from algorix.series import IndicatorValue
+    from algorix.web.server import _watchlist_row
+
+    score = StockScore(
+        symbol="S5", as_of=TARGET, score=IndicatorValue.unavailable("ineligible"),
+        eligible=False, ineligible_reasons=["circuit-locked"],
+    )
+
+    row = _watchlist_row("S5", type("I", (), {"name": None})(), None, score)
+
+    assert row["score"] is None
+    assert row["reason"] == "circuit-locked"
+    assert row["contributions"] == {}
+
+
+# --- scan trigger API ---------------------------------------------------------
+
+
+def test_trigger_scan_runs_pipeline_and_updates_status(client, monkeypatch):
+    import algorix.web.server as web_app
+
+    calls = []
+    monkeypatch.setattr(
+        web_app, "refresh",
+        lambda db, **kw: calls.append("refresh") or SimpleNamespace(errors=[]),
+    )
+    monkeypatch.setattr(
+        web_app, "run_scan",
+        lambda db, **kw: calls.append("scan") or SimpleNamespace(errors=[]),
+    )
+    monkeypatch.setattr(web_app, "last_refresh_started_at", lambda data_dir: None)
+
+    response = client.post("/scan/run")
+
+    assert response.status_code == 202
+    assert calls == ["refresh", "scan"]
+    assert client.get("/scan/status").json()["status"] == "success"
+
+
+def test_trigger_scan_surfaces_collected_errors_not_just_exceptions(client, monkeypatch):
+    """refresh()/run_scan() collect per-instrument failures into `.errors`
+    instead of raising -- a route that only catches exceptions would
+    report "success" on a run that silently failed to fetch part of the
+    universe, violating the never-silently-swallow rule."""
+    import algorix.web.server as web_app
+
+    monkeypatch.setattr(
+        web_app, "refresh",
+        lambda db, **kw: SimpleNamespace(errors=["delivery 2026-09-18: timeout"]),
+    )
+    monkeypatch.setattr(web_app, "run_scan", lambda db, **kw: SimpleNamespace(errors=[]))
+    monkeypatch.setattr(web_app, "last_refresh_started_at", lambda data_dir: None)
+
+    client.post("/scan/run")
+
+    status = client.get("/scan/status").json()
+    assert status["status"] == "error"
+    assert "timeout" in status["error"]
+
+
+def test_trigger_scan_during_cooldown_is_rejected(client, monkeypatch):
+    import algorix.web.server as web_app
+
+    monkeypatch.setattr(
+        web_app, "last_refresh_started_at",
+        lambda data_dir: datetime.now(timezone.utc),
+    )
+
+    assert client.post("/scan/run").status_code == 429
+
+
+def test_trigger_scan_when_lock_held_elsewhere_reports_error(client, monkeypatch):
+    """Hold a raw OS lock on the same file refresh_lock() uses, without
+    going through refresh_lock() itself -- that would also stamp a fresh
+    "started at" timestamp and trip the cooldown check before the
+    lock-contention path this test targets is ever reached."""
+    import fcntl
+
+    import algorix.web.server as web_app
+    from algorix.refresh import REFRESH_LOCK_FILENAME
+
+    monkeypatch.setattr(web_app, "last_refresh_started_at", lambda data_dir: None)
+
+    data_dir = web_app._config().data_dir
+    data_dir.mkdir(parents=True, exist_ok=True)
+    fd = open(data_dir / REFRESH_LOCK_FILENAME, "a+")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        client.post("/scan/run")  # background task hits the held lock
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        fd.close()
+
+    status = client.get("/scan/status").json()
+    assert status["status"] == "error"
+    assert "already running" in status["error"]
+
+
+def test_scan_status_shape_when_idle(client, monkeypatch):
+    import algorix.web.server as web_app
+
+    monkeypatch.setattr(web_app, "_scan_state", {"status": "idle"})
+    monkeypatch.setattr(web_app, "last_refresh_started_at", lambda data_dir: None)
+
+    body = client.get("/scan/status").json()
+
+    assert body["status"] == "idle"
+    assert set(body) == {
+        "status", "started_at", "finished_at", "error",
+        "last_run_started_at", "cooldown_remaining_seconds",
+    }
 
 
 # --- backtest -------------------------------------------------------------

@@ -11,6 +11,43 @@
   {% if universe.unscored %} · {{ universe.unscored|length }} unscored{% endif %}
 </p>
 
+<div class="panel" style="display:flex;justify-content:space-between;align-items:center">
+  <button id="run-scan-btn" class="btn" type="button">Run scan now</button>
+  <span id="run-scan-status" class="sub" style="margin:0"></span>
+</div>
+<script>
+(function () {
+  var btn = document.getElementById("run-scan-btn");
+  var status = document.getElementById("run-scan-status");
+
+  function poll() {
+    fetch("/scan/status").then(function (r) { return r.json(); }).then(function (s) {
+      if (s.status === "running") {
+        btn.disabled = true;
+        status.textContent = "scan running...";
+        setTimeout(poll, 5000);
+      } else if (s.cooldown_remaining_seconds) {
+        btn.disabled = true;
+        status.textContent = "last run " + Math.round(s.cooldown_remaining_seconds / 60) + "m cooldown remaining";
+      } else {
+        btn.disabled = false;
+        status.textContent = s.status === "error" ? "last run failed: " + s.error
+          : s.status === "success" ? "last run OK" : "";
+      }
+    });
+  }
+
+  btn.addEventListener("click", function () {
+    fetch("/scan/run", { method: "POST" }).then(function (r) {
+      if (r.status === 202) { poll(); return; }
+      return r.json().then(function (b) { status.textContent = b.detail || "could not start scan"; });
+    });
+  });
+
+  poll();
+})();
+</script>
+
 {% set v = regime.verdict|string %}
 <div class="panel">
   <div class="banner {% if v == 'FAVOURABLE' %}good{% elif v == 'HOSTILE' %}bad{% elif v == 'MIXED' %}warn{% endif %}">

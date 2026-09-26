@@ -100,6 +100,19 @@ class RiskProfile:
         return IndicatorValue.of(risk_amount / per_share_risk)
 
 
+#: Human-readable labels for the scoring signal codes, shared by every UI
+#: surface that displays contributions (dashboard, watchlist, backtest,
+#: AI Q&A) so they can never silently drift apart from each other.
+SIGNAL_LABELS = {
+    "A1": "momentum",
+    "A2": "52w high",
+    "A3": "trend",
+    "A4": "breakout",
+    "A5": "pullback",
+    "A6": "delivery",
+}
+
+
 @dataclass(frozen=True)
 class StockScore:
     """A scored instrument, with everything needed to explain the number."""

@@ -556,3 +556,32 @@ def pead_signal(
         )
 
     return IndicatorValue.of(latest.surprise_pct)
+
+
+def stock_indicator_rows(
+    series: PriceSeries,
+    records: Sequence[DeliveryRecord],
+    calendar: TradingCalendar | None = None,
+):
+    """(code, label, IndicatorValue, unit, format_spec) rows for one
+    instrument's detail page.
+
+    Shared by web/server.py's stock_detail() (renders each via _fmt) and
+    qa.py's gather_stock_context() (feeds the same numbers into the AI
+    prompt) -- lives here, one layer below both, so neither has to import
+    the other; extracted so the two can never silently show the LLM
+    different numbers than the page shows the user.
+    """
+    state = trend_state(series, calendar)
+    donchian_pos = donchian_position(series, calendar=calendar)
+    short_return = short_term_return(series, calendar=calendar)
+    rows = [
+        ("A2", "52-week high proximity", pct_of_52_week_high(series, calendar), "%", ".1f"),
+        ("A4", "Donchian position", donchian_pos, "%", ".1f"),
+        ("A5", "5-session return", short_return, "%", ".1f"),
+        ("A6", "delivery %", latest_delivery_pct(records), "%", ".1f"),
+        ("A6", "delivery trend", delivery_trend(records), "x", ".2f"),
+        ("A7", "relative volume", relative_volume(series, calendar=calendar), "x", ".2f"),
+        ("C1", "ATR", atr_percent(series, calendar=calendar), "%", ".2f"),
+    ]
+    return state, donchian_pos, short_return, rows

@@ -12,6 +12,7 @@ from algorix.models import (
     Exchange,
     Instrument,
     InstrumentType,
+    QaQuery,
 )
 
 SESSION = date(2026, 9, 18)
@@ -317,4 +318,45 @@ def test_point_missing_price_is_rejected():
     with pytest.raises(DataIntegrityError, match="missing 'time' or 'price'"):
         ChartDrawing(
             instrument_id=1, tool_type="breakout", points=[{"time": "2026-09-18"}]
+        )
+
+
+# --------------------------------------------------------------------------
+# QaQuery -- positive and negative
+# --------------------------------------------------------------------------
+
+
+def test_qa_query_with_valid_fields_is_accepted():
+    query = QaQuery(
+        instrument_id=1, question="Why the pullback?", context={"score": 77.6},
+        answer="Delivery% dropped while price held.", model_id="claude-sonnet-5",
+        prompt_version=1,
+    )
+
+    assert query.question == "Why the pullback?"
+    assert query.id is None
+    assert query.asked_at is None
+
+
+def test_qa_query_empty_question_is_rejected():
+    with pytest.raises(DataIntegrityError, match="question cannot be empty"):
+        QaQuery(
+            instrument_id=1, question="", context={}, answer="something",
+            model_id="claude-sonnet-5", prompt_version=1,
+        )
+
+
+def test_qa_query_whitespace_question_is_rejected():
+    with pytest.raises(DataIntegrityError, match="question cannot be empty"):
+        QaQuery(
+            instrument_id=1, question="   ", context={}, answer="something",
+            model_id="claude-sonnet-5", prompt_version=1,
+        )
+
+
+def test_qa_query_empty_answer_is_rejected():
+    with pytest.raises(DataIntegrityError, match="answer cannot be empty"):
+        QaQuery(
+            instrument_id=1, question="something", context={}, answer="",
+            model_id="claude-sonnet-5", prompt_version=1,
         )

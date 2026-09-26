@@ -44,6 +44,8 @@ from algorix.models import (
     InstrumentType,
     Materiality,
     Polarity,
+    QaQuery,
+    WatchlistEntry,
 )
 
 _SCHEMA_V1 = """
@@ -257,6 +259,38 @@ CREATE INDEX IF NOT EXISTS idx_chart_drawings_instrument
     ON chart_drawings (instrument_id);
 """
 
+# Personal watchlist -- membership is boolean per instrument, so
+# instrument_id is the primary key itself rather than a synthetic
+# autoincrement id: there is no second identity to give a watchlist entry.
+# UI-only, like chart_drawings -- never read by scoring.py.
+_SCHEMA_V10 = """
+CREATE TABLE IF NOT EXISTS watchlist (
+    instrument_id  INTEGER PRIMARY KEY REFERENCES instruments(id) ON DELETE CASCADE,
+    added_at       TEXT    NOT NULL
+);
+"""
+
+# AI Q&A audit trail (CLAUDE.md invariant 7: every LLM verdict logged with
+# prompt version and model ID). Stores the full assembled context, not a
+# hash -- this is a personal, low-volume tool, and full context is what
+# actually lets a bad answer be debugged later; a hash tells you nothing.
+# UI-only, like chart_drawings/watchlist -- never read by scoring.py.
+_SCHEMA_V11 = """
+CREATE TABLE IF NOT EXISTS qa_queries (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    instrument_id  INTEGER NOT NULL REFERENCES instruments(id) ON DELETE CASCADE,
+    question       TEXT    NOT NULL CHECK (question <> ''),
+    context        TEXT    NOT NULL CHECK (json_valid(context)),
+    answer         TEXT    NOT NULL CHECK (answer <> ''),
+    model_id       TEXT    NOT NULL,
+    prompt_version INTEGER NOT NULL,
+    asked_at       TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_qa_queries_instrument
+    ON qa_queries (instrument_id, asked_at);
+"""
+
 #: Ordered migrations. Each runs once, in version order, against databases
 #: older than it. Never edit a migration that has shipped -- add a new one.
 _MIGRATIONS: list[tuple[int, str]] = [
@@ -269,6 +303,8 @@ _MIGRATIONS: list[tuple[int, str]] = [
     (7, _SCHEMA_V7),
     (8, _SCHEMA_V8),
     (9, _SCHEMA_V9),
+    (10, _SCHEMA_V10),
+    (11, _SCHEMA_V11),
 ]
 
 SCHEMA_VERSION = _MIGRATIONS[-1][0]
@@ -397,6 +433,13 @@ class InstrumentRepository:
             row = conn.execute(
                 "SELECT * FROM instruments WHERE symbol = ? AND exchange = ?",
                 (symbol, str(exchange)),
+            ).fetchone()
+        return _row_to_instrument(row) if row else None
+
+    def get_by_id(self, instrument_id: int) -> Instrument | None:
+        with self.db.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM instruments WHERE id = ?", (instrument_id,)
             ).fetchone()
         return _row_to_instrument(row) if row else None
 
@@ -1165,6 +1208,118 @@ def _row_to_chart_drawing(row: sqlite3.Row) -> ChartDrawing:
         tool_type=row["tool_type"],
         points=json.loads(row["points"]),
         created_at=datetime.fromisoformat(row["created_at"]),
+    )
+
+
+class WatchlistRepository:
+    """Read/write access to the personal watchlist. UI-only -- never read
+    by scoring.py, scan.py, or the journal, the same boundary
+    ChartDrawingRepository draws.
+    """
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    def add(self, instrument_id: int) -> WatchlistEntry:
+        """Add an instrument to the watchlist. Idempotent -- adding an
+        already-watchlisted instrument is a no-op, not an error, matching
+        the upsert convention every other write in this schema follows.
+        """
+        added_at = _utc_now_iso()
+        with self.db.connect() as conn:
+            conn.execute(
+                "INSERT INTO watchlist (instrument_id, added_at) VALUES (?, ?) "
+                "ON CONFLICT (instrument_id) DO NOTHING",
+                (instrument_id, added_at),
+            )
+            row = conn.execute(
+                "SELECT added_at FROM watchlist WHERE instrument_id = ?",
+                (instrument_id,),
+            ).fetchone()
+        return WatchlistEntry(instrument_id, datetime.fromisoformat(row["added_at"]))
+
+    def remove(self, instrument_id: int) -> bool:
+        with self.db.connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM watchlist WHERE instrument_id = ?", (instrument_id,)
+            )
+            return cursor.rowcount > 0
+
+    def contains(self, instrument_id: int) -> bool:
+        with self.db.connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM watchlist WHERE instrument_id = ?", (instrument_id,)
+            ).fetchone()
+        return row is not None
+
+    def list_all(self) -> list[WatchlistEntry]:
+        """Oldest-added first."""
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT instrument_id, added_at FROM watchlist ORDER BY added_at"
+            ).fetchall()
+        return [
+            WatchlistEntry(r["instrument_id"], datetime.fromisoformat(r["added_at"]))
+            for r in rows
+        ]
+
+
+class QaQueryRepository:
+    """Read/write access to the AI Q&A audit trail (see QaQuery in
+    models.py). UI-only -- never read by scoring.py, scan.py, or the
+    journal.
+    """
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    def create(self, query: QaQuery) -> QaQuery:
+        """Insert one Q&A audit row. Returns it with `id`/`asked_at` filled
+        in -- same cursor.lastrowid idiom as ChartDrawingRepository.create,
+        no natural key to re-select by."""
+        asked_at = _utc_now_iso()
+        with self.db.connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO qa_queries
+                    (instrument_id, question, context, answer, model_id,
+                     prompt_version, asked_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    query.instrument_id,
+                    query.question,
+                    json.dumps(query.context),
+                    query.answer,
+                    query.model_id,
+                    query.prompt_version,
+                    asked_at,
+                ),
+            )
+            new_id = int(cursor.lastrowid)
+        return replace(query, id=new_id, asked_at=datetime.fromisoformat(asked_at))
+
+    def history_for(self, instrument_id: int, limit: int = 20) -> list[QaQuery]:
+        """Most recent first."""
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM qa_queries WHERE instrument_id = ? "
+                "ORDER BY asked_at DESC LIMIT ?",
+                (instrument_id, limit),
+            ).fetchall()
+        return [_row_to_qa_query(r) for r in rows]
+
+
+def _row_to_qa_query(row: sqlite3.Row) -> QaQuery:
+    return QaQuery(
+        id=row["id"],
+        instrument_id=row["instrument_id"],
+        question=row["question"],
+        context=json.loads(row["context"]),
+        answer=row["answer"],
+        model_id=row["model_id"],
+        prompt_version=row["prompt_version"],
+        asked_at=datetime.fromisoformat(row["asked_at"]),
     )
 
 

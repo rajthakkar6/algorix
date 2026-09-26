@@ -55,3 +55,12 @@ class DataIntegrityError(DataSourceError):
 
 class StorageError(AlgorixError):
     """Persistence layer failure."""
+
+
+class RefreshLockError(AlgorixError):
+    """Another refresh is already in progress (lock file held).
+
+    Raised when a cron-triggered run and a UI-triggered run would otherwise
+    overlap -- concurrent runs would double up rate-limited NSE/yfinance
+    calls and could submit two overlapping G4 sentiment batches.
+    """

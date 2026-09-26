@@ -530,6 +530,72 @@ should be able to place the same kind of marker manually.
   `chart_drawings` rows -- every row created during testing was deleted
   before the session ended.
 
+### 6.2 Watchlist, manual scan trigger, AI Q&A (DONE, 2026-09-26)
+
+User asked for three UI additions together. All three shipped, tested
+(752 offline tests), and verified against the real app with real data
+(including one real LLM call and one real full refresh/scan run).
+
+- **Watchlist.** New `watchlist` table (boolean membership,
+  `instrument_id` as its own PK -- no synthetic id needed),
+  `WatchlistRepository`, toggle button on the stock page, and a
+  `/watchlist` page. The watchlist is filtered out of the *same* scored
+  universe `dashboard()` computes (`_score_current_session`, shared by
+  both) -- a watchlisted symbol is never scored in isolation, which would
+  produce percentiles incomparable to the dashboard's (invariant 8). A
+  watchlisted symbol that's dropped from the tracked index, ineligible, or
+  genuinely unscored shows that reason explicitly, never a fabricated
+  score.
+- **Manual scan trigger.** `POST /scan/run` runs the identical
+  whole-universe `refresh()` → `run_scan()` pipeline cron already runs at
+  07:30, in a `BackgroundTasks` job (first use of that in this app), with
+  a `GET /scan/status` polling endpoint and a button on the dashboard.
+  Two gaps this exposed for the first time and closed: (1) nothing
+  previously stopped a cron-triggered and a manually-triggered refresh
+  from overlapping -- fixed with `refresh.refresh_lock()`, an advisory
+  `fcntl.flock` shared by `refresh.main()`'s cron path and the new
+  web-triggered path, so there is exactly one lock implementation; (2)
+  unthrottled manual triggering would multiply G4 sentiment-batch cost
+  and NSE/yfinance rate-limit exposure past the daily cron cadence --
+  fixed with a 45-minute cooldown, keyed off the lock file's own
+  "started at" timestamp (not "finished successfully," so a failed run
+  can't be retried immediately). `refresh()`/`run_scan()` both *collect*
+  per-instrument failures into `.errors` rather than raising, so
+  `_run_pipeline` checks `.errors`, not just exceptions, or a partially-
+  failed run would report "success." **Verified with a real full run**
+  (clicked the button for real, ~2 minutes, completed successfully,
+  delivered to the real configured Telegram chat) -- not a mocked
+  approximation.
+- **AI Q&A.** New `src/algorix/qa.py`, sitting beside `sentiment.py` the
+  way `sentiment.py` sits beside `scoring.py`. One-shot (no conversation
+  memory), **synchronous** -- the first non-batch LLM call in this
+  codebase (`sentiment.py`'s `Extractor` protocol is batch-shaped only).
+  Deliberately separate env vars from G4 (`ALGORIX_QA_PROVIDER`/
+  `ALGORIX_QA_MODEL`, not `ALGORIX_LLM_PROVIDER`/`_MODEL`) so a
+  G4 cost-driven model change can't silently change Q&A quality too.
+  `gather_stock_context()` assembles the same indicators/trend/score the
+  stock page already shows (`indicators.stock_indicator_rows`, extracted
+  out of `web/server.py` so page and prompt can never silently diverge)
+  plus delivery, PEAD, recent G4-extracted events, and recent OHLCV --
+  every missing piece renders as explicit "unavailable" text, never
+  omitted. The system prompt states the quant score as this tool's single
+  authoritative number and requires any disagreement to be labelled, not
+  substituted (invariant 1); nothing here is read by `scoring.py`
+  (invariant 2). Every answer is logged to a new `qa_queries` table with
+  the answerer's own resolved `model_id` and `PROMPT_VERSION` (invariant
+  7) -- full context stored, not a hash, since this is a low-volume
+  personal tool and full context is what actually lets a bad answer be
+  debugged later. Cost is flagged explicitly in the module docstring:
+  unlike G4's batch discount, this is full-price per question. **Verified
+  with real LLM calls** (via the OpenAI provider, the credential actually
+  configured) -- the answers correctly cited the exact indicator values
+  shown on the same page (e.g. "relative volume is 0.47 times the
+  average," "ATR is 1.45%," matching the Indicators table exactly), and
+  the audit row landed in the real database with the correct model id.
+  The default (Anthropic, unconfigured in this environment) was also
+  verified to degrade cleanly to a visible "not configured" message, in
+  the browser, not a crash.
+
 - **Data ingestion**: fundamentals, news/event NLP, social sentiment,
   options flow, institutional/insider filings, promoter pledge tracking,
   macro indicators (rates, VIX, yield curve).
@@ -547,8 +613,8 @@ should be able to place the same kind of marker manually.
 - **Feedback loop**: full trade journal UI, realized-outcome tracking,
   continuous recalibration of scoring weights against actual performance.
 - **Alerting**: intraday threshold-crossing alerts, not just the morning digest.
-- **UX**: dashboard with score breakdown (radar/waterfall chart), watchlist +
-  screener + journal in one flow, paper-trading mode.
+- **UX**: dashboard with score breakdown (radar/waterfall chart), screener +
+  journal in one flow (watchlist itself shipped, see §6.2), paper-trading mode.
 
 ---
 

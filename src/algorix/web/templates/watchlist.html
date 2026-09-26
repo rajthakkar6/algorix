@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Watchlist — Algorix{% endblock %}
+{% block n4 %}on{% endblock %}
+{% block ctx %}{{ as_of.strftime('%d %b %Y') }}{% endblock %}
+{% block body %}
+
+<h1>Watchlist</h1>
+
+{% if rows %}
+<div class="panel scroll">
+<table>
+  <thead><tr>
+    <th>Symbol</th><th class="num">Score</th><th class="hide-sm">Added</th>
+  </tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td><a class="sym" href="/stock/{{ r.symbol }}">{{ r.symbol }}</a>
+        {% if r.name %}<span class="sub" style="margin:0"> · {{ r.name }}</span>{% endif %}</td>
+      <td class="num">
+        {% if r.score and r.score.available %}<span class="score">{{ r.score.text }}</span>
+        {% else %}<span class="na" title="{{ r.reason or '' }}">--</span>{% endif %}
+      </td>
+      <td class="hide-sm sub" style="margin:0">{{ r.added_at.strftime('%d %b %Y') if r.added_at else '' }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="sub">Scored the same cross-sectional way as the morning scan -- a dash means the symbol is currently ineligible, dropped from the tracked index, or not yet scanned; hover for why.</p>
+{% else %}
+<div class="panel"><p class="sub" style="margin:0">Nothing on your watchlist yet. Add a stock from its detail page.</p></div>
+{% endif %}
+{% endblock %}

@@ -23,8 +23,11 @@ a US holiday. The report separates them so a real gap is not lost in noise.
 
 from __future__ import annotations
 
+import fcntl
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from algorix.announcements import (
@@ -43,7 +46,7 @@ from algorix.earnings import (
     YFinanceEarningsClient,
     ingest_earnings,
 )
-from algorix.exceptions import AlgorixError, DataUnavailableError
+from algorix.exceptions import AlgorixError, DataUnavailableError, RefreshLockError
 from algorix.ingestion import IngestReport, YFinanceBarSource, ingest_instrument
 from algorix.metals import METAL_INSTRUMENTS, seed_metal_instruments
 from algorix.models import CalendarPolicy, Exchange, Instrument, InstrumentType
@@ -99,6 +102,63 @@ DEFAULT_ANNOUNCEMENT_HISTORY_DAYS = 30
 #: `DEFAULT_OVERLAP_SESSIONS` -- catches an announcement corrected or
 #: reissued after its original timestamp.
 DEFAULT_ANNOUNCEMENT_OVERLAP_DAYS = 3
+
+#: Name of the advisory lock file under Config.data_dir. Shared by
+#: refresh.main()'s cron path and web/server.py's manual-trigger path, so
+#: there is exactly one lock implementation, not two.
+REFRESH_LOCK_FILENAME = "refresh.lock"
+
+
+@contextmanager
+def refresh_lock(data_dir: Path):
+    """Exclusive, non-blocking lock so a manually-triggered refresh cannot
+    overlap the cron-triggered one (or another manual trigger).
+
+    Advisory (fcntl.flock), scoped to one file under `data_dir`. Two
+    separate `open()` calls on the same path get independent open-file
+    descriptions, so `flock()` conflicts even within a single process --
+    this is what makes the lock straightforward to unit test without
+    threads or subprocesses.
+
+    Writes the acquisition timestamp into the file on every successful
+    acquire -- this doubles as `last_refresh_started_at`'s data source, so
+    the manual-trigger cooldown needs no new table.
+    """
+    data_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = data_dir / REFRESH_LOCK_FILENAME
+    fd = open(lock_path, "a+")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        fd.close()
+        raise RefreshLockError(
+            f"another refresh is already running (lock held on {lock_path})"
+        ) from exc
+    try:
+        fd.seek(0)
+        fd.truncate()
+        fd.write(datetime.now(timezone.utc).isoformat())
+        fd.flush()
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        fd.close()
+
+
+def last_refresh_started_at(data_dir: Path) -> datetime | None:
+    """When the most recent refresh (cron or manual) last *started* --
+    not finished.
+
+    Deliberately "started", not "last successful run": the G4 submission
+    and NSE/yfinance calls happen early in refresh(), so a run that started
+    and later errored has already spent that budget -- a cooldown keyed on
+    success would let a failed run retry-storm immediately.
+    """
+    lock_path = data_dir / REFRESH_LOCK_FILENAME
+    if not lock_path.exists():
+        return None
+    text = lock_path.read_text().strip()
+    return datetime.fromisoformat(text) if text else None
 
 
 @dataclass(frozen=True)
@@ -646,16 +706,21 @@ def main(argv: list[str] | None = None) -> int:
     config.ensure_data_dir()
     database = Database(args.db or config.db_path)
 
-    report = refresh(
-        database,
-        skip_universe=args.skip_universe,
-        skip_delivery=args.skip_delivery,
-        skip_announcements=args.skip_announcements,
-        skip_sentiment=args.skip_sentiment,
-        skip_earnings=args.skip_earnings,
-        index_symbol=args.index.upper(),
-        initial_history_days=args.history_days,
-    )
+    try:
+        with refresh_lock(config.data_dir):
+            report = refresh(
+                database,
+                skip_universe=args.skip_universe,
+                skip_delivery=args.skip_delivery,
+                skip_announcements=args.skip_announcements,
+                skip_sentiment=args.skip_sentiment,
+                skip_earnings=args.skip_earnings,
+                index_symbol=args.index.upper(),
+                initial_history_days=args.history_days,
+            )
+    except RefreshLockError as exc:
+        print(str(exc))
+        return 1
     print(report.summary())
     return 0 if report.is_clean else 1
 

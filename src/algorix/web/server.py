@@ -16,10 +16,11 @@ Run with:  python -m algorix.web
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from dataclasses import replace as _dc_replace
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -29,29 +30,26 @@ from algorix.backtest import evaluate_signals, run_backtest
 from algorix.calendar import IST, TradingCalendar
 from algorix.config import Config
 from algorix.cross_sectional import compute_universe_momentum
+from algorix.exceptions import AlgorixError, RefreshLockError
 from algorix.indicators import (
     DELIVERY_BASELINE,
     PEAD_WINDOW_SESSIONS,
-    atr_percent,
-    delivery_trend,
-    donchian_position,
-    latest_delivery_pct,
-    pct_of_52_week_high,
-    relative_volume,
-    short_term_return,
-    trend_state,
+    stock_indicator_rows,
 )
 from algorix.journal import Journal
 from algorix.metals import metal_snapshot
 from algorix.models import ChartDrawing, Exchange
+from algorix.qa import ask_about_stock
+from algorix.refresh import last_refresh_started_at, refresh, refresh_lock
 from algorix.regime import (
     INDIA_VIX,
     NIFTY_INDEX,
     FlowRepository,
     assess_regime,
 )
-from algorix.scan import SCAN_LOOKBACK_SESSIONS
-from algorix.scoring import score_universe
+from algorix.scan import SCAN_LOOKBACK_SESSIONS, run_scan
+from algorix.scoring import SIGNAL_LABELS, score_universe
+from algorix.sentiment import NotConfiguredError
 from algorix.series import load_series
 from algorix.storage import (
     ChartDrawingRepository,
@@ -59,6 +57,7 @@ from algorix.storage import (
     Database,
     EarningsSurpriseRepository,
     InstrumentRepository,
+    WatchlistRepository,
 )
 from algorix.universe import NIFTY_50, ConstituencyRepository
 
@@ -80,9 +79,18 @@ _state: dict[str, object] = {}
 
 def configure(db_path: str | Path | None = None, index_symbol: str = NIFTY_50) -> None:
     config = Config.from_env()
+    if db_path is not None:
+        # Colocate the lock file with the given database, matching how a
+        # real Config's db_path already sits inside its own data_dir --
+        # otherwise a test-supplied db_path would leave config.data_dir
+        # pointing at the real environment's data directory, and
+        # refresh_lock()/last_refresh_started_at() would read/write the
+        # real ~/.algorix/refresh.lock instead of the test's own tmp path.
+        config = _dc_replace(config, db_path=Path(db_path), data_dir=Path(db_path).parent)
     _state["db"] = Database(db_path or config.db_path)
     _state["calendar"] = TradingCalendar()
     _state["index"] = index_symbol
+    _state["config"] = config
 
 
 def _db() -> Database:
@@ -101,6 +109,64 @@ def _index() -> str:
     if "index" not in _state:
         configure()
     return str(_state["index"])
+
+
+def _config() -> Config:
+    if "config" not in _state:
+        configure()
+    return _state["config"]  # type: ignore[return-value]
+
+
+#: UI-only throttle -- each manual run resubmits a G4 sentiment batch and
+#: re-hits NSE/yfinance rate limits; this keeps a click-happy user from
+#: multiplying that cost/rate-limit exposure past the once-daily cron
+#: cadence. Not in Config: this is a UI behaviour, not a data-layer
+#: setting, same reasoning as _BREAKOUT_DONCHIAN_THRESHOLD above.
+SCAN_COOLDOWN_SECONDS = 45 * 60
+
+#: In-process only -- lost on restart, which is fine: the actual safety
+#: mechanism against overlap is refresh_lock's flock, not this dict. A
+#: fresh process starting at "idle" is correct, since nothing is actually
+#: still running after a restart.
+_scan_state: dict[str, object] = {"status": "idle"}
+
+
+def _run_pipeline(db_path) -> None:
+    """Runs refresh() then run_scan() -- the identical whole-universe
+    pipeline cron already runs, just invoked on demand.
+
+    refresh()/run_scan() both *collect* per-instrument failures into
+    `.errors` rather than raising (see their own docstrings) -- so
+    surfacing a failure here means checking `.errors`, not only catching
+    exceptions, or a data-source failure would finish "successfully" and
+    violate CLAUDE.md's never-silently-swallow rule.
+    """
+    config = _config()
+    db = Database(db_path)
+    try:
+        with refresh_lock(config.data_dir):
+            refresh_report = refresh(db)
+            scan_result = run_scan(db, deliver=True)
+    except RefreshLockError as exc:
+        _scan_state.update(
+            status="error", error=str(exc),
+            finished_at=datetime.now(timezone.utc).isoformat(),
+        )
+        return
+    except Exception as exc:  # truly unexpected -- must not vanish silently
+        _scan_state.update(
+            status="error",
+            error=f"unexpected failure: {type(exc).__name__}: {exc}",
+            finished_at=datetime.now(timezone.utc).isoformat(),
+        )
+        return
+
+    errors = list(refresh_report.errors) + list(scan_result.errors)
+    _scan_state.update(
+        status="error" if errors else "success",
+        error="; ".join(errors) if errors else None,
+        finished_at=datetime.now(timezone.utc).isoformat(),
+    )
 
 
 def _fmt(value, spec: str = ".1f") -> dict:
@@ -196,6 +262,34 @@ def _current_session() -> date:
     return _calendar().last_completed_session(datetime.now(IST))
 
 
+def _score_current_session(as_of: date, index_symbol: str):
+    """Load + cross-sectionally score the full universe for `as_of`.
+
+    Shared by dashboard() and watchlist_view() -- a watchlist subset is
+    always filtered out of this same scored universe, never scored in
+    isolation. Scoring only the watchlisted symbols would compute
+    different, incomparable percentiles than what the dashboard shows for
+    the same stock (invariant 8: rank cross-sectionally, within one
+    cohort) -- silently showing two different numbers for the same symbol
+    under the same label would be exactly the kind of un-labelled method
+    mismatch invariant 5 forbids.
+
+    Returns None when there is no data at all (mirrors dashboard()'s own
+    empty-database check).
+    """
+    calendar = _calendar()
+    series, delivery, _, industry, earnings = _load_universe(as_of, index_symbol)
+    if not series:
+        return None
+    momentum = compute_universe_momentum(series, as_of, calendar)
+    universe = score_universe(
+        series, momentum, as_of, delivery_by_symbol=delivery,
+        calendar=calendar, universe_label=index_symbol,
+        industry_by_symbol=industry, earnings_by_symbol=earnings,
+    )
+    return series, universe
+
+
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request, top: int = 25):
     """Latest scan: regime banner plus the ranked table."""
@@ -203,20 +297,14 @@ def dashboard(request: Request, top: int = 25):
     index_symbol = _index()
     as_of = _current_session()
 
-    series, delivery, _, industry, earnings = _load_universe(as_of, index_symbol)
-    if not series:
+    loaded = _score_current_session(as_of, index_symbol)
+    if loaded is None:
         return TEMPLATES.TemplateResponse(
             request=request,
             name="empty.html",
             context={"message": "No data yet. Run `python -m algorix.refresh` first."},
         )
-
-    momentum = compute_universe_momentum(series, as_of, calendar)
-    universe = score_universe(
-        series, momentum, as_of, delivery_by_symbol=delivery,
-        calendar=calendar, universe_label=index_symbol,
-        industry_by_symbol=industry, earnings_by_symbol=earnings,
-    )
+    series, universe = loaded
 
     instrument_repo = InstrumentRepository(db)
 
@@ -276,16 +364,51 @@ def dashboard(request: Request, top: int = 25):
             "rows": rows,
             "universe": universe,
             "metals": metals,
-            "signal_labels": {
-                "A1": "momentum",
-                "A2": "52w high",
-                "A3": "trend",
-                "A4": "breakout",
-                "A5": "pullback",
-                "A6": "delivery",
-            },
+            "signal_labels": SIGNAL_LABELS,
         },
     )
+
+
+@app.post("/scan/run", status_code=202)
+def trigger_scan(background_tasks: BackgroundTasks):
+    """Kick off the same whole-universe refresh()+run_scan() pipeline cron
+    runs at 07:30, on demand. Runs in the background -- refresh() alone
+    makes ~57 sequential external HTTP calls, so blocking the request on
+    it would be a poor UX and risks a client-side timeout.
+    """
+    if _scan_state.get("status") == "running":
+        raise HTTPException(409, "a scan is already running")
+
+    started = last_refresh_started_at(_config().data_dir)
+    if started is not None:
+        elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+        if elapsed < SCAN_COOLDOWN_SECONDS:
+            remaining = int(SCAN_COOLDOWN_SECONDS - elapsed)
+            raise HTTPException(429, f"cooldown active -- try again in {remaining // 60}m")
+
+    _scan_state.update(
+        status="running", started_at=datetime.now(timezone.utc).isoformat(),
+        finished_at=None, error=None,
+    )
+    background_tasks.add_task(_run_pipeline, _db().path)
+    return {"status": "started"}
+
+
+@app.get("/scan/status")
+def scan_status():
+    started = last_refresh_started_at(_config().data_dir)
+    remaining = None
+    if started is not None:
+        elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+        remaining = max(0, int(SCAN_COOLDOWN_SECONDS - elapsed))
+    return {
+        "status": _scan_state.get("status", "idle"),
+        "started_at": _scan_state.get("started_at"),
+        "finished_at": _scan_state.get("finished_at"),
+        "error": _scan_state.get("error"),
+        "last_run_started_at": started.isoformat() if started else None,
+        "cooldown_remaining_seconds": remaining,
+    }
 
 
 @app.get("/stock/{symbol}", response_class=HTMLResponse)
@@ -307,17 +430,12 @@ def stock_detail(request: Request, symbol: str):
         instrument.id, calendar.trading_days_ago(as_of, DELIVERY_BASELINE * 2), as_of
     )
 
-    state = trend_state(series, calendar)
-    donchian_pos = donchian_position(series, calendar=calendar)
-    short_return = short_term_return(series, calendar=calendar)
+    state, donchian_pos, short_return, raw_rows = stock_indicator_rows(
+        series, records, calendar
+    )
     indicators = [
-        ("A2", "52-week high proximity", _fmt(pct_of_52_week_high(series, calendar)), "%"),
-        ("A4", "Donchian position", _fmt(donchian_pos), "%"),
-        ("A5", "5-session return", _fmt(short_return), "%"),
-        ("A6", "delivery %", _fmt(latest_delivery_pct(records)), "%"),
-        ("A6", "delivery trend", _fmt(delivery_trend(records), ".2f"), "x"),
-        ("A7", "relative volume", _fmt(relative_volume(series, calendar=calendar), ".2f"), "x"),
-        ("C1", "ATR", _fmt(atr_percent(series, calendar=calendar), ".2f"), "%"),
+        (code, label, _fmt(value, spec), unit)
+        for code, label, value, unit, spec in raw_rows
     ]
 
     history = Journal(db).history_for(symbol, limit=60)
@@ -326,6 +444,7 @@ def stock_detail(request: Request, symbol: str):
         _auto_markers(donchian_pos, short_return, state, latest.session_date)
         if latest else []
     )
+    on_watchlist = WatchlistRepository(db).contains(instrument.id)
 
     return TEMPLATES.TemplateResponse(
         request=request,
@@ -340,6 +459,7 @@ def stock_detail(request: Request, symbol: str):
             "history": history,
             "latest": latest,
             "auto_markers": auto_markers,
+            "on_watchlist": on_watchlist,
         },
     )
 
@@ -468,6 +588,128 @@ def delete_drawing(symbol: str, drawing_id: int):
         raise HTTPException(404, f"drawing {drawing_id} not found for {symbol.upper()}")
 
 
+@app.post("/stock/{symbol}/watchlist")
+def add_to_watchlist(symbol: str):
+    """Add an instrument to the watchlist. Idempotent -- 200, not 201, since
+    a repeat call isn't creating anything new (matches
+    WatchlistRepository.add()'s own upsert-style idempotency)."""
+    db = _db()
+    instrument = InstrumentRepository(db).get(symbol.upper(), Exchange.NSE)
+    if instrument is None or instrument.id is None:
+        raise HTTPException(404, f"{symbol.upper()} is not in the database.")
+    entry = WatchlistRepository(db).add(instrument.id)
+    return {"symbol": symbol.upper(), "added_at": entry.added_at.isoformat()}
+
+
+@app.delete("/stock/{symbol}/watchlist", status_code=204)
+def remove_from_watchlist(symbol: str):
+    db = _db()
+    instrument = InstrumentRepository(db).get(symbol.upper(), Exchange.NSE)
+    if instrument is None or instrument.id is None:
+        raise HTTPException(404, f"{symbol.upper()} is not in the database.")
+    if not WatchlistRepository(db).remove(instrument.id):
+        raise HTTPException(404, f"{symbol.upper()} is not on the watchlist.")
+
+
+class QuestionRequest(BaseModel):
+    question: str
+
+
+@app.post("/stock/{symbol}/ask")
+def ask_stock_question(symbol: str, body: QuestionRequest):
+    """One-shot AI Q&A about a stock -- see qa.py for the full design
+    rationale (synchronous, one-shot, invariant 1/2 boundaries).
+
+    Missing credentials degrade to 200 {"configured": false}, the same
+    "opt-in feature, not a failure" shape NotConfiguredError already has
+    for G4/Telegram elsewhere in this app. Anything else real (SDK
+    failure, malformed LLM response) is a loud 502, never swallowed.
+    """
+    db = _db()
+    symbol = symbol.upper()
+    if not body.question.strip():
+        raise HTTPException(422, "question cannot be blank")
+
+    instrument = InstrumentRepository(db).get(symbol, Exchange.NSE)
+    if instrument is None or instrument.id is None:
+        raise HTTPException(404, f"{symbol} is not in the database.")
+
+    try:
+        query = ask_about_stock(db, instrument, body.question, calendar=_calendar())
+    except NotConfiguredError as exc:
+        return {"configured": False, "reason": str(exc)}
+    except AlgorixError as exc:
+        raise HTTPException(502, f"AI Q&A failed: {type(exc).__name__}: {exc}")
+
+    return {
+        "configured": True,
+        "answer": query.answer,
+        "model_id": query.model_id,
+        "prompt_version": query.prompt_version,
+        "asked_at": query.asked_at.isoformat(),
+    }
+
+
+def _watchlist_row(symbol, instrument, added_at, score) -> dict:
+    """One /watchlist row. "Unavailable is shown, never hidden" applied to
+    three distinct cases a watchlisted symbol can be in that universe.top()
+    never has to handle: dropped from the tracked index, ineligible
+    (circuit-lock/F&O-ban/etc, invariant 4), or genuinely unscored."""
+    base = {"symbol": symbol, "name": instrument.name, "added_at": added_at}
+    if score is None:
+        return {
+            **base, "score": None, "contributions": {},
+            "reason": "not in the currently tracked universe, or no scan yet",
+        }
+    if not score.eligible:
+        return {
+            **base, "score": None, "contributions": {},
+            "reason": "; ".join(score.ineligible_reasons) or "ineligible",
+        }
+    return {
+        **base,
+        "score": _fmt(score.score),
+        "contributions": {c.code: c.percentile for c in score.contributions},
+        "reason": None if score.score.available else score.score.reason,
+    }
+
+
+@app.get("/watchlist", response_class=HTMLResponse)
+def watchlist_view(request: Request):
+    """Watchlisted stocks, scored exactly like the dashboard -- see
+    _score_current_session's docstring for why this never scores the
+    watchlist subset in isolation."""
+    db = _db()
+    as_of = _current_session()
+    instrument_repo = InstrumentRepository(db)
+
+    entries = WatchlistRepository(db).list_all()
+    watched = [
+        (instrument.symbol, instrument, e.added_at)
+        for e in entries
+        if (instrument := instrument_repo.get_by_id(e.instrument_id)) is not None
+    ]
+    if not watched:
+        return TEMPLATES.TemplateResponse(
+            request=request, name="watchlist.html",
+            context={"as_of": as_of, "rows": []},
+        )
+
+    loaded = _score_current_session(as_of, _index())
+    universe = loaded[1] if loaded is not None else None
+
+    rows = [
+        _watchlist_row(symbol, instrument, added_at,
+                       universe.scores.get(symbol) if universe else None)
+        for symbol, instrument, added_at in watched
+    ]
+
+    return TEMPLATES.TemplateResponse(
+        request=request, name="watchlist.html",
+        context={"as_of": as_of, "rows": rows},
+    )
+
+
 @app.get("/backtest", response_class=HTMLResponse)
 def backtest_view(request: Request, sessions: int = 250, horizon: int = 20):
     """Replay results -- does the score actually predict returns?"""
@@ -490,14 +732,7 @@ def backtest_view(request: Request, sessions: int = 250, horizon: int = 20):
             ),
             "horizon": horizon,
             "sessions": sessions,
-            "labels": {
-                "A1": "momentum",
-                "A2": "52w high",
-                "A3": "trend",
-                "A4": "breakout",
-                "A5": "pullback (inverted)",
-                "A6": "delivery",
-            },
+            "labels": {**SIGNAL_LABELS, "A5": "pullback (inverted)"},
         },
     )
 

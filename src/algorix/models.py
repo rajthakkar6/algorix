@@ -359,3 +359,44 @@ class ChartDrawing:
                 raise DataIntegrityError(
                     f"chart drawing: point {point!r} missing 'time' or 'price'"
                 )
+
+
+@dataclass(frozen=True)
+class WatchlistEntry:
+    """One instrument flagged on the personal watchlist.
+
+    Membership is boolean, not point-in-time like index_constituents --
+    `added_at` is bookkeeping, not a validity window. UI-only: never read
+    by scoring.py, scan.py, or the journal, the same boundary ChartDrawing
+    already draws.
+    """
+
+    instrument_id: int
+    added_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class QaQuery:
+    """One AI Q&A audit row (CLAUDE.md invariant 7: every LLM verdict
+    logged with prompt version and model ID).
+
+    Pure audit trail -- never read by scoring.py, scan.py, or the journal,
+    the same boundary ExtractedEvent and ChartDrawing already draw. `context`
+    is the full assembled prompt context (see qa.py's StockContext), stored
+    as a dict for later debugging of a bad answer.
+    """
+
+    instrument_id: int
+    question: str
+    context: dict
+    answer: str
+    model_id: str
+    prompt_version: int
+    id: int | None = None
+    asked_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if not self.question.strip():
+            raise DataIntegrityError("qa query: question cannot be empty")
+        if not self.answer.strip():
+            raise DataIntegrityError("qa query: answer cannot be empty")

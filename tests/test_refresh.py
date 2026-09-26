@@ -13,7 +13,11 @@ import pytest
 
 from algorix.calendar import TradingCalendar
 from algorix.delivery import BhavcopyResult
-from algorix.exceptions import DataUnavailableError, SourceUnreachableError
+from algorix.exceptions import (
+    DataUnavailableError,
+    RefreshLockError,
+    SourceUnreachableError,
+)
 from algorix.ingestion import bars_from_dataframe
 from algorix.models import Bar, DeliveryRecord, Exchange, Instrument, InstrumentType
 from algorix.refresh import (
@@ -21,7 +25,9 @@ from algorix.refresh import (
     RefreshReport,
     _start_date_for,
     gap_report,
+    last_refresh_started_at,
     refresh,
+    refresh_lock,
 )
 from algorix.storage import BarRepository, Database, InstrumentRepository
 from algorix.universe import ConstituentRecord
@@ -973,3 +979,57 @@ def test_valid_llm_provider_env_var_is_respected(db, cal, monkeypatch):
     assert report.sentiment_submission.submitted is False
     assert "OPENAI_API_KEY" in report.sentiment_submission.reason
     assert report.bars_stored > 0
+
+
+# --------------------------------------------------------------------------
+# refresh_lock / last_refresh_started_at
+# --------------------------------------------------------------------------
+
+
+def test_refresh_lock_rejects_concurrent_acquisition(tmp_path):
+    with refresh_lock(tmp_path):
+        with pytest.raises(RefreshLockError):
+            with refresh_lock(tmp_path):
+                pass
+
+
+def test_refresh_lock_is_released_after_use(tmp_path):
+    with refresh_lock(tmp_path):
+        pass
+
+    with refresh_lock(tmp_path):  # must not raise
+        pass
+
+
+def test_refresh_lock_is_released_on_exception(tmp_path):
+    with pytest.raises(ValueError):
+        with refresh_lock(tmp_path):
+            raise ValueError("boom")
+
+    with refresh_lock(tmp_path):  # must not still be held
+        pass
+
+
+def test_last_refresh_started_at_before_any_run_is_none(tmp_path):
+    assert last_refresh_started_at(tmp_path) is None
+
+
+def test_last_refresh_started_at_updates_on_acquire(tmp_path):
+    before = datetime.now(ZoneInfo("UTC"))
+
+    with refresh_lock(tmp_path):
+        started = last_refresh_started_at(tmp_path)
+
+    assert started is not None
+    assert started >= before
+
+
+def test_last_refresh_started_at_survives_a_failed_run(tmp_path):
+    """The cooldown must key off attempt, not success -- a run that
+    started and then raised must still show a recent start time, not None
+    or a stale one, or the manual-trigger button could retry-storm."""
+    with pytest.raises(ValueError):
+        with refresh_lock(tmp_path):
+            raise ValueError("boom")
+
+    assert last_refresh_started_at(tmp_path) is not None
